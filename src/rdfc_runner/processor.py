@@ -1,0 +1,48 @@
+from abc import ABC, abstractmethod
+from typing import Union, Dict, List, TypeVar, Generic, Any
+
+from .reader import Reader
+from .writer import Writer
+
+Primitive = Union[
+    str,
+    int,
+    Reader,
+    Writer,
+    "ProcessorArgs",
+]
+
+ProcessorArgs = Dict[str, Union[Primitive, List[Primitive]]]
+
+T = TypeVar("T", bound=ProcessorArgs)
+
+
+class Processor(Generic[T], ABC):
+    args: T
+
+    def __init__(self, args: T):
+        self.args = args
+        for key, value in args.items():
+            setattr(self, key, value)
+
+    def get(self, key: str) -> Any:
+        """Get the argument by key."""
+        return self.args[key]
+
+    @abstractmethod
+    async def init(self) -> None:
+        """This is the first function that is called (and awaited) when creating a processor.
+        This is the perfect location to start things like database connections."""
+        raise NotImplementedError("The init method must be implemented by the subclass.")
+
+    @abstractmethod
+    async def transform(self) -> None:
+        """Function to start reading channels.
+        This function is called for each processor before `produce` is called."""
+        raise NotImplementedError("The transform method must be implemented by the subclass.")
+
+    @abstractmethod
+    async def produce(self) -> None:
+        """Function to start the production of data, starting the pipeline.
+        This function is called after all processors are completely set up."""
+        raise NotImplementedError("The produce method must be implemented by the subclass.")

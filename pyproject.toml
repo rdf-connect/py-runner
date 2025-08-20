@@ -1,0 +1,42 @@
+[project]
+name = "rdfc_runner"
+version = "0.0.1"
+description = "Python runner for RDF-Connect"
+authors = [
+    { name = "Ieben Smessaert", email = "ieben.smessaert@ugent.be" }
+]
+readme = "README.md"
+requires-python = ">= 3.12"
+license = "MIT"
+dependencies = [
+    "grpcio>=1.74.0",
+    "grpcio-tools>=1.74.0",
+    "protobuf>=6.31.1",
+    "rdfc-proto>=0.0.1",
+    "types-protobuf>=6.30.2.20250703",
+]
+
+[project.urls]
+Homepage = "https://rdf-connect.github.io"
+Repository = "https://github.com/rdf-connect/py-runner"
+Issues = "https://github.com/rdf-connect/py-runner/issues"
+
+[project.scripts]
+rdfc-runner = "rdfc_runner.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rdfc_runner"]
+
+[tool.hatch.envs.default]
+type = "virtual"
+path = ".venv"
+system-packages = false
+installer = "uv"
+env-vars = { PYTHONPATH = "src" }

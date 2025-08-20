@@ -1,0 +1,23 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix sh: <http://www.w3.org/ns/shacl#>.
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+
+rdfc:PyRunner a rdfc:Runner;
+    rdfc:handlesSubjectsOf rdfc:pyImplementationOf;
+    rdfc:command "hatch run python -m rdfc_runner".
+
+<PyProcessorShape> a sh:NodeShape;
+  sh:targetSubjectsOf rdfc:pyImplementationOf;
+  sh:property [
+    sh:path rdfc:module_path;
+    sh:name "module_path";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:datatype xsd:string;
+  ], [
+    sh:path rdfc:class;
+    sh:name "clazz";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:datatype xsd:string;
+  ].
