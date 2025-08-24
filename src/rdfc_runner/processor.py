@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from dataclasses import asdict, is_dataclass
 from typing import Union, Dict, List, TypeVar, Generic, Any
 
 from .reader import Reader
@@ -22,7 +23,14 @@ class Processor(Generic[T], ABC):
 
     def __init__(self, args: T):
         self.args = args
-        for key, value in args.items():
+        if is_dataclass(args):
+            args_dict = asdict(args)
+        elif isinstance(args, dict):
+            args_dict = args
+        else:
+            raise TypeError("Processor args must be a dict or dataclass")
+
+        for key, value in args_dict.items():
             setattr(self, key, value)
 
     def get(self, key: str) -> Any:
