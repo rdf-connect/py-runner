@@ -1,6 +1,6 @@
 [project]
 name = "rdfc_runner"
-version = "0.0.2"
+version = "0.0.3"
 description = "Python runner for RDF-Connect"
 authors = [
     { name = "Ieben Smessaert", email = "ieben.smessaert@ugent.be" }
