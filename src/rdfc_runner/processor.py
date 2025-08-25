@@ -15,7 +15,7 @@ Primitive = Union[
 
 ProcessorArgs = Dict[str, Union[Primitive, List[Primitive]]]
 
-T = TypeVar("T", bound=ProcessorArgs)
+T = TypeVar("T")
 
 
 class Processor(Generic[T], ABC):
@@ -23,6 +23,8 @@ class Processor(Generic[T], ABC):
 
     def __init__(self, args: T):
         self.args = args
+
+        # Prepare dict for attribute injection
         if is_dataclass(args):
             args_dict = asdict(args)
         elif isinstance(args, dict):
@@ -30,11 +32,14 @@ class Processor(Generic[T], ABC):
         else:
             raise TypeError("Processor args must be a dict or dataclass")
 
+        # Expose args also as attributes
         for key, value in args_dict.items():
             setattr(self, key, value)
 
     def get(self, key: str) -> Any:
         """Get the argument by key."""
+        if is_dataclass(self.args):
+            return getattr(self.args, key)
         return self.args[key]
 
     @abstractmethod

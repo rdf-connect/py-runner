@@ -119,7 +119,7 @@ class Runner:
         self._processors.append(instance)
         self._processor_transforms.append(instance.transform())
 
-        ### 2.1. Notify the orchestrator that the processor is succesfuly initiated using a RPC.init message.
+        ### 2.1. Notify the orchestrator that the processor is successfully initiated using a RPC.init message.
         await self._write(orchestrator_pb2.OrchestratorMessage(init=orchestrator_pb2.ProcessorInit(uri=processor.uri)))
 
         return instance
