@@ -97,8 +97,17 @@ class Runner:
                 reader.close()
             for writer in self._writers.get(message.close.channel, []):
                 await writer.close(True)
+        elif message.HasField('processed'):
+            # Handle the processed acknowledgment from the orchestrator.
+            self.logger.debug("Received processed acknowledgment from orchestrator for channel " + message.processed.channel)
+            writers = self._writers.get(message.processed.channel, [])
+            if writers:
+                for writer in writers:
+                    writer.handled()
+            else:
+                self.logger.error(f"No writer found for channel {message.processed.channel} to handle processed ack.")
         else:
-            self.logger.warning("Received unknown message type from orchestrator.")
+            self.logger.error("Received unknown message type from orchestrator.")
 
     async def add_processor(self, processor: service_pb2.Processor):
         # Start the processor with the given configuration.
@@ -152,7 +161,7 @@ class Runner:
             async def listen_to_normal_stream():
                 try:
                     async for msg in normal_stream:
-                        print("HERE 2", msg, "\n")
+                        self.logger.error("HERE 2 msg")
                         ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
                         # containing the full expanded pipeline in Turtle format.
                         if msg.HasField('pipeline'):
@@ -161,12 +170,12 @@ class Runner:
 
                         ### 2. The orchestrator sends an RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
                         elif msg.HasField('proc'):
-                            self.logger.warning("HERE 3" + msg.proc)
+                            self.logger.error("HERE 3 msg.proc")
                             await self.add_processor(msg.proc)
 
                         ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
                         elif msg.HasField('start'):
-                            self.logger.warning("HERE 4")
+                            self.logger.error("HERE 4 msg.start")
                             # Execute the start function of each processor instantiation.
                             asyncio.create_task(self.start()).add_done_callback(
                                 # Wait (in the background) until all processors are done executing, and then resolve the task.

@@ -51,7 +51,8 @@ class WriterInstance(Writer):
     open_streams: int = 0
     should_close: list[asyncio.Future] = []
 
-    def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, runner_id: str, logger: Logger):
+    def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, runner_id: str,
+                 logger: Logger):
         self._uri = uri
         self.client = client
         self.notify_orchestrator = notify_orchestrator
@@ -75,13 +76,13 @@ class WriterInstance(Writer):
         transform = transform or (lambda x: x if isinstance(x, bytes) else bytes(x))
 
         # Initiate a sending stream with an RPC.sendStreamMessage. (6.3.4.3)
-        stream = self.client.sendStreamMessage()
+        sending_stream = self.client.sendStreamMessage()
         handled_stream_msg = self.await_processed()
         local_sequence_number = self.local_sequence_number
         self.local_sequence_number += 1
 
         # Send the stream message notification
-        await self.notify_orchestrator(
+        await sending_stream.write(
             common_pb2.StreamChunk(
                 id=common_pb2.StreamIdentify(
                     localSequenceNumber=local_sequence_number,
@@ -95,7 +96,7 @@ class WriterInstance(Writer):
 
         async def read_id():
             try:
-                async for chunk in stream:
+                async for chunk in sending_stream:
                     id_future.set_result(chunk.id)
                     break
             except Exception as e:
@@ -113,7 +114,7 @@ class WriterInstance(Writer):
 
             async def process_chunk():
                 try:
-                    async for _ in stream:
+                    async for _ in sending_stream:
                         id_future.set_result(None)
                         break
                 except Exception as e:
@@ -121,12 +122,16 @@ class WriterInstance(Writer):
 
             asyncio.create_task(process_chunk())
 
-            await stream.notify_orchestrator(common_pb2.DataChunk(data=transform(msg)))
+            await sending_stream.write(
+                common_pb2.StreamChunk(
+                    data=common_pb2.DataChunk(data=transform(msg))
+                )
+            )
 
             # Await a message on the stream, indicating that the chunk has been processed
             await chunk_processed_future
 
-        await stream.done_writing()
+        await sending_stream.done_writing()
 
         await handled_stream_msg
         self.open_streams -= 1
@@ -147,7 +152,11 @@ class WriterInstance(Writer):
             channel=self.uri,
             data=buffer,
         )
-        await self.notify_orchestrator(msg)
+        await self.notify_orchestrator(
+            service_pb2.FromRunner(
+                msg=msg
+            )
+        )
         await processed_msg_future
 
     async def any(self, any_obj: AnyType) -> None:
@@ -161,7 +170,7 @@ class WriterInstance(Writer):
         else:
             raise ValueError("Unsupported AnyType object")
 
-    async def await_processed(self) -> asyncio.Future:
+    def await_processed(self) -> asyncio.Future:
         """Wait until all messages sent to the writer are processed."""
         event = asyncio.Future()
         self.awaiting_processed.append(event)
@@ -200,3 +209,12 @@ class WriterInstance(Writer):
             if not future.done():
                 future.set_result(None)
         self.should_close.clear()
+
+    def handled(self):
+        """Notify that a message has been processed."""
+        if len(self.awaiting_processed) > 0:
+            event = self.awaiting_processed.pop(0)
+            if not event.done():
+                event.set_result(None)
+        else:
+            self.logger.debug(f"{self.uri} expected to be waiting for a message to be processed, but none found.")
