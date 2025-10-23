@@ -157,13 +157,19 @@ class ReaderInstance(Reader):
             consumers_done.append(consumer.push_stream(substream, done))
             idx += 1
 
-        await write_sending_stream_control_message(common_pb2.SendingStreamControl(globalSequenceNumber=idx))
+        await write_sending_stream_control_message(common_pb2.SendingStreamControl(globalSequenceNumber=msg.globalSequenceNumber))
 
         async def notify_after_all():
             await asyncio.gather(*consumers_done)
             self.logger.debug("Processed streaming message for all consumers")
-            self.notify_orchestrator(
-                service_pb2.FromRunner(processed=common_pb2.GlobalAck(globalSequenceNumber=idx, channel=msg.channel)))
+            await self.notify_orchestrator(
+                service_pb2.FromRunner(
+                    processed=common_pb2.GlobalAck(
+                        globalSequenceNumber=msg.globalSequenceNumber,
+                        channel=msg.channel
+                    )
+                )
+            )
 
         asyncio.create_task(notify_after_all())
 

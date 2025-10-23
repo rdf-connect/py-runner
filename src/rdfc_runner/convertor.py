@@ -37,6 +37,13 @@ class StringConvertor(Convertor[str]):
         """Convert bytes to a string."""
         return buffer.decode()
 
+    async def from_stream(self, chunks: AsyncGenerator[bytes, None]) -> str:
+        """Convert an asynchronous stream of bytes to a string."""
+        parts = []
+        async for chunk in chunks:
+            parts.append(chunk.decode())
+        return ''.join(parts)
+
 
 class NoConvertor(Convertor[bytes]):
     def from_bytes(self, buffer: bytes) -> bytes:

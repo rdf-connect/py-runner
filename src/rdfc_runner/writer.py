@@ -73,7 +73,7 @@ class WriterInstance(Writer):
     async def stream(self, buffer: AsyncIterable, transform: Optional[Callable[[object], bytes]] = None):
         """Write a stream of bytes to the writer."""
         self.open_streams += 1
-        transform = transform or (lambda x: x if isinstance(x, bytes) else bytes(x))
+        transform = transform or (lambda x: x if isinstance(x, bytes) else bytes(x, 'utf-8'))
 
         # Initiate a sending stream with an RPC.sendStreamMessage. (6.3.4.3)
         sending_stream = self.client.sendStreamMessage()
@@ -97,7 +97,7 @@ class WriterInstance(Writer):
         async def read_id():
             try:
                 async for chunk in sending_stream:
-                    id_future.set_result(chunk.id)
+                    id_future.set_result(chunk.streamSequenceNumber)
                     break
             except Exception as e:
                 id_future.set_exception(e)
@@ -115,10 +115,10 @@ class WriterInstance(Writer):
             async def process_chunk():
                 try:
                     async for _ in sending_stream:
-                        id_future.set_result(None)
+                        chunk_processed_future.set_result(None)
                         break
                 except Exception as e:
-                    id_future.set_exception(e)
+                    chunk_processed_future.set_exception(e)
 
             asyncio.create_task(process_chunk())
 
