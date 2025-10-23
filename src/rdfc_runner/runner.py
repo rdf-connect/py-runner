@@ -126,7 +126,7 @@ class Runner:
         self.logger.info(f"Processor {processor.uri} initialized")
 
         self._processors.append(instance)
-        self._processor_transforms.append(instance.transform())
+        self._processor_transforms.append(asyncio.create_task(instance.transform()))
 
         ### 2.1. Notify the orchestrator that the processor is successfully initiated using an RPC.init message.
         await self._write(service_pb2.FromRunner(initialized=service_pb2.ProcessorInitialized(uri=processor.uri)))
