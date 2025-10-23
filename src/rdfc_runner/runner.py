@@ -5,7 +5,7 @@ from logging import getLogger, Logger
 from typing import List, Awaitable, Any, Dict
 
 import grpc.aio
-from rdfc_proto import service_pb2_grpc, orchestrator_pb2, runner_pb2, common_pb2
+from rdfc_proto import service_pb2_grpc, common_pb2, service_pb2
 
 from .logger import Logger as GrpcLogger
 from .processor import Processor
@@ -42,14 +42,14 @@ class Runner:
         normal_stream = stub.connect()
 
         # Define async writable function to send messages to the orchestrator.
-        async def writable(msg: orchestrator_pb2.OrchestratorMessage):
+        async def writable(msg: service_pb2.FromRunner):
             await normal_stream.write(msg)
 
         self._write = writable
 
         ### 1.2. Send the initial 'identify' message to the orchestrator.
-        await self._write(orchestrator_pb2.OrchestratorMessage(
-            identify=orchestrator_pb2.Identify(uri=self.uri)
+        await self._write(service_pb2.FromRunner(
+            identify=service_pb2.RunnerIdentify(uri=self.uri)
         ))
 
         return normal_stream
@@ -62,18 +62,18 @@ class Runner:
 
     def create_reader(self, uri: str) -> Reader:
         self._readers.setdefault(uri, [])
-        reader = ReaderInstance(uri, self._client)
+        reader = ReaderInstance(uri, self._client, self._write, self.logger)
         self._readers[uri].append(reader)
         return reader
 
     def create_writer(self, uri: str) -> Writer:
         self._writers.setdefault(uri, [])
-        writer = WriterInstance(uri, self._client, self._write)
+        writer = WriterInstance(uri, self._client, self._write, self.uri, self.logger)
         self._writers[uri].append(writer)
         return writer
 
-    async def handle_orchestrator_message(self, message: runner_pb2.RunnerMessage):
-        ### 4.1. Handle a RPC.msg normal message received from the orchestrator. (6.2.2.1 / 6.3.4.1)
+    async def handle_orchestrator_message(self, message: service_pb2.ToRunner):
+        ### 4.1. Handle an RPC.msg normal message received from the orchestrator. (6.2.2.1 / 6.3.4.1)
         if message.HasField('msg'):
             # Process the message from the orchestrator.
             self.logger.debug("Received message from orchestrator")
@@ -100,7 +100,7 @@ class Runner:
         else:
             self.logger.warning("Received unknown message type from orchestrator.")
 
-    async def add_processor(self, processor: runner_pb2.Processor):
+    async def add_processor(self, processor: service_pb2.Processor):
         # Start the processor with the given configuration.
         self.logger.debug(f"Adding processor {processor.uri}")
         args = AttrDict(parse_args(processor.arguments, self))
@@ -119,14 +119,10 @@ class Runner:
         self._processors.append(instance)
         self._processor_transforms.append(instance.transform())
 
-        ### 2.1. Notify the orchestrator that the processor is successfully initiated using a RPC.init message.
-        await self._write(orchestrator_pb2.OrchestratorMessage(init=orchestrator_pb2.ProcessorInit(uri=processor.uri)))
+        ### 2.1. Notify the orchestrator that the processor is successfully initiated using an RPC.init message.
+        await self._write(service_pb2.FromRunner(initialized=service_pb2.ProcessorInitialized(uri=processor.uri)))
 
         return instance
-
-    async def handle_message(self, message: common_pb2.Message):
-        # Get the readers attached to the message channel.
-        pass
 
     async def listen_to_normal_stream(self, normal_stream):
         async for message in normal_stream:
@@ -152,21 +148,25 @@ class Runner:
             # Await all processors to finish
             processors_ended = asyncio.Future()
 
+            print("HERE 1\n")
             async def listen_to_normal_stream():
                 try:
                     async for msg in normal_stream:
+                        print("HERE 2", msg, "\n")
                         ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
                         # containing the full expanded pipeline in Turtle format.
                         if msg.HasField('pipeline'):
                             self.pipeline = msg.pipeline
                             self.logger.debug("Pipeline received")
 
-                        ### 2. The orchestrator sends a RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
+                        ### 2. The orchestrator sends an RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
                         elif msg.HasField('proc'):
+                            self.logger.warning("HERE 3" + msg.proc)
                             await self.add_processor(msg.proc)
 
                         ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
                         elif msg.HasField('start'):
+                            self.logger.warning("HERE 4")
                             # Execute the start function of each processor instantiation.
                             asyncio.create_task(self.start()).add_done_callback(
                                 # Wait (in the background) until all processors are done executing, and then resolve the task.

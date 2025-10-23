@@ -9,7 +9,7 @@ rdfc:PyRunner a rdfc:Runner;
 <PyProcessorShape> a sh:NodeShape;
   sh:targetSubjectsOf rdfc:pyImplementationOf;
   sh:property [
-    sh:path rdfc:module_path;
+    sh:path rdfc:modulePath;
     sh:name "module_path";
     sh:minCount 1;
     sh:maxCount 1;

@@ -1,8 +1,8 @@
 from typing import Callable, Awaitable, Any
 
-from rdfc_proto import orchestrator_pb2
+from rdfc_proto import service_pb2
 
-Writable = Callable[[orchestrator_pb2.OrchestratorMessage], Awaitable[Any]]
+Writable = Callable[[service_pb2.FromRunner], Awaitable[Any]]
 
 
 class AttrDict(dict):

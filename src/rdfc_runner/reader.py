@@ -1,14 +1,16 @@
 import asyncio
 from abc import abstractmethod, ABC
 from collections.abc import AsyncIterable
-from typing import AsyncGenerator, List
+from logging import Logger
+from typing import AsyncGenerator, List, Awaitable
 
-from rdfc_proto import common_pb2
-from rdfc_proto import service_pb2_grpc
+from rdfc_proto import common_pb2, service_pb2_grpc, service_pb2
 
 from .convertor import AnyType
 from .convertor import StringConvertor, StreamConvertor, NoConvertor, AnyConvertor
 from .iterable import MyIter
+from .types import Writable
+from .utils import fanout_stream
 
 
 ### Interface ###
@@ -40,12 +42,12 @@ class Reader(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def handle_msg(self, msg: common_pb2.Message):
+    def handle_msg(self, msg: common_pb2.ReceivingMessage):
         """Handle a message from the orchestrator."""
         raise NotImplementedError()
 
     @abstractmethod
-    def handle_streaming_msg(self, msg: common_pb2.StreamMessage):
+    def handle_streaming_msg(self, msg: common_pb2.ReceivingStreamMessage):
         """Handle a streaming message from the orchestrator."""
         raise NotImplementedError()
 
@@ -57,10 +59,12 @@ class Reader(ABC):
 
 ### Implementations ###
 class ReaderInstance(Reader):
-    def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub):
+    def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, logger: Logger):
         self._uri = uri
         self.client = client
-        self.iterators: List[MyIter] = []
+        self.notify_orchestrator = notify_orchestrator
+        self.logger = logger
+        self.consumers: List[MyIter] = []
 
     @property
     def uri(self) -> str:
@@ -70,41 +74,100 @@ class ReaderInstance(Reader):
     def strings(self) -> AsyncIterable[str]:
         """Return an async iterator of strings."""
         my_iter = MyIter(StringConvertor())
-        self.iterators.append(my_iter)
+        self.consumers.append(my_iter)
         return my_iter
 
     def streams(self) -> AsyncIterable[AsyncGenerator[bytes, None]]:
         """Return an async iterator of byte streams."""
         my_iter = MyIter(StreamConvertor())
-        self.iterators.append(my_iter)
+        self.consumers.append(my_iter)
         return my_iter
 
     def buffers(self) -> AsyncIterable[bytes]:
         """Return an async iterator of byte buffers."""
         my_iter = MyIter(NoConvertor())
-        self.iterators.append(my_iter)
+        self.consumers.append(my_iter)
         return my_iter
 
     def anys(self) -> AsyncIterable[AnyType]:
         """Return an async iterator of AnyType."""
         my_iter = MyIter(AnyConvertor())
-        self.iterators.append(my_iter)
+        self.consumers.append(my_iter)
         return my_iter
 
-    def handle_msg(self, msg: common_pb2.Message):
+    def handle_msg(self, msg: common_pb2.ReceivingMessage):
         """Handle a message from the orchestrator."""
-        for iterator in self.iterators:
-            iterator.push(msg.data)
+        self.logger.debug(f"{self.uri} handling incoming message of {len(msg.data)} bytes")
 
-    def handle_streaming_msg(self, msg: common_pb2.StreamMessage):
+        async def push_to_consumer(consumer: MyIter, data: bytes):
+            future = asyncio.Future()
+            consumer.push(data, lambda: future.set_result(None))
+            await future
+
+        async def push_to_consumers():
+            # Wait for all consumers to process the message
+            await asyncio.gather(
+                *[
+                    push_to_consumer(consumer, msg.data)
+                    for consumer in self.consumers
+                ]
+            )
+
+            # Notify the orchestrator after all consumers have processed the message
+            await self.notify_orchestrator(
+                service_pb2.FromRunner(
+                    processed=common_pb2.GlobalAck(
+                        globalSequenceNumber=msg.globalSequenceNumber,
+                        channel=msg.channel,
+                    )
+                )
+            )
+
+        asyncio.create_task(push_to_consumers())
+
+    async def handle_streaming_msg(self, msg: common_pb2.ReceivingStreamMessage):
         """Handle a streaming message from the orchestrator."""
+        self.logger.debug(
+            f"{self.uri} handling incoming streaming message with global sequence number {msg.globalSequenceNumber}")
         # Start a receiving stream to receive the streaming messages over the stream message channel.
-        chunks = self.client.receiveStreamMessage(msg.id)
-        # Then, send the message chunk to the processor's reader instance.
-        for iterator in self.iterators:
-            asyncio.create_task(iterator.push_stream(chunks))
+        receiving_stream = self.client.receiveStreamMessage()
 
-    def close(self):
+        async def write_sending_stream_control_message(message: common_pb2.SendingStreamControl) -> None:
+            await receiving_stream.write(message)
+
+        # fan out the stream to all iterators
+        consumers_done: List[Awaitable[None]] = []
+        idx = 0
+
+        stream_iters = fanout_stream(
+            receiving_stream,
+            len(self.consumers),
+            lambda: write_sending_stream_control_message(common_pb2.SendingStreamControl(streamSequenceNumber=idx)),
+        )
+
+        for consumer in self.consumers:
+            consumed_future = asyncio.Future()
+
+            def done(fut=consumed_future):
+                if not fut.done():
+                    fut.set_result(None)
+
+            substream = stream_iters.pop()
+            assert substream is not None
+            consumers_done.append(consumer.push_stream(substream, done))
+            idx += 1
+
+        await write_sending_stream_control_message(common_pb2.SendingStreamControl(globalSequenceNumber=idx))
+
+        async def notify_after_all():
+            await asyncio.gather(*consumers_done)
+            self.logger.debug("Processed streaming message for all consumers")
+            self.notify_orchestrator(
+                service_pb2.FromRunner(processed=common_pb2.GlobalAck(globalSequenceNumber=idx, channel=msg.channel)))
+
+        asyncio.create_task(notify_after_all())
+
+    def close(self) -> None:
         """Close all iterators."""
-        for iterator in self.iterators:
-            iterator.close()
+        for consumer in self.consumers:
+            consumer.close(lambda: None)

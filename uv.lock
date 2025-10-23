@@ -79,7 +79,7 @@ wheels = [
 
 [[package]]
 name = "rdfc-proto"
-version = "0.0.1"
+version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
@@ -87,14 +87,14 @@ dependencies = [
     { name = "protobuf" },
     { name = "types-protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/90/e7/6d05b0d9c9acab1a6c729fad3e500a378179face5600438917625338b402/rdfc_proto-0.0.1.tar.gz", hash = "sha256:a467758bd1485af1659e2996d8d909e695b114cc3158f4b5fa174340197bc396", size = 8414, upload-time = "2025-08-20T10:00:06.957Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/be/4b2bc88dbfc3f8c4403f0b23d2310298387ad3966a481ab0a7639d7cf8d4/rdfc_proto-1.0.0.tar.gz", hash = "sha256:0ee22540731b6ca6484539cc0438d1f02e5f5311074bb17c55a5b89ec6ed9e2e", size = 8459, upload-time = "2025-10-17T07:04:50.86Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/b2/9702dd03e4a2c4091e4127059acdf81612e13f478462320b30d0bb86ded1/rdfc_proto-0.0.1-py3-none-any.whl", hash = "sha256:f5a4c9958d44b0bb89511b1b7df363f09241f5c9095c89e770e71487eb26cbb6", size = 14316, upload-time = "2025-08-20T10:00:08.302Z" },
+    { url = "https://files.pythonhosted.org/packages/91/f1/f7196734119e437d8d5c33bd2442f878da8dff1922663350f3099c69e54e/rdfc_proto-1.0.0-py3-none-any.whl", hash = "sha256:29d2c7867b740e0b69e986d697919e36371b918fc58fef716840d6493d295cab", size = 9346, upload-time = "2025-10-17T07:04:51.56Z" },
 ]
 
 [[package]]
 name = "rdfc-runner"
-version = "0.0.1"
+version = "0.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
@@ -109,7 +109,7 @@ requires-dist = [
     { name = "grpcio", specifier = ">=1.74.0" },
     { name = "grpcio-tools", specifier = ">=1.74.0" },
     { name = "protobuf", specifier = ">=6.31.1" },
-    { name = "rdfc-proto", specifier = ">=0.0.1" },
+    { name = "rdfc-proto", specifier = ">=1.0.0" },
     { name = "types-protobuf", specifier = ">=6.30.2.20250703" },
 ]
 
