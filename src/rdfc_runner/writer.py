@@ -102,19 +102,10 @@ class WriterInstance(Writer):
         self.logger.debug(f"{self.uri} streams message with id {msg_id}")
 
         async for msg in buffer:
+            # Start a future to start listening for the processed acknowledgment of this chunk we are sending
+            chunk_processed_future = asyncio.create_task(self.sending_stream_ready(sending_stream=sending_stream))
 
-            async def await_processed_chunk_control_msg():
-                chunk_processed_future = asyncio.Future()
-                try:
-                    async for _ in sending_stream:
-                        chunk_processed_future.set_result(None)
-                        break
-                except Exception as e:
-                    chunk_processed_future.set_exception(e)
-                return chunk_processed_future
-
-            chunk_processed_future = asyncio.create_task(await_processed_chunk_control_msg())
-
+            # Send the chunk over the stream
             await sending_stream.write(
                 common_pb2.StreamChunk(
                     data=common_pb2.DataChunk(data=transform(msg))
@@ -169,20 +160,11 @@ class WriterInstance(Writer):
         self.awaiting_processed.append(event)
         return event
 
-    def sending_stream_ready(self, sending_stream: AsyncIterable) -> None:
+    async def sending_stream_ready(self, sending_stream: AsyncIterable) -> asyncio.Future():
         """Wait until the sending stream is ready, and return its stream sequence number."""
-        id_future = asyncio.Future()
-
-        async def read_id():
-            try:
-                async for chunk in sending_stream:
-                    id_future.set_result(chunk.streamSequenceNumber)
-                    break
-            except Exception as e:
-                id_future.set_exception(e)
-
-        asyncio.create_task(read_id())
-        return id_future
+        async for chunk in sending_stream:
+            return chunk.streamSequenceNumber
+        raise Exception("Sending stream finish before finding a streamSequenceNumber")
 
     async def close(self, issued: bool = False) -> None:
         """

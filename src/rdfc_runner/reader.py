@@ -148,7 +148,7 @@ class ReaderInstance(Reader):
         stream_iters = fanout_stream(
             receiving_stream,
             len(self.consumers),
-            lambda: write_sending_stream_control_message(),
+            write_sending_stream_control_message,
         )
 
         for consumer in self.consumers:
@@ -160,7 +160,9 @@ class ReaderInstance(Reader):
             asyncio.create_task(consumer.push_stream(substream, lambda: consumed_future.set_result(None)))
             consumers_done.append(consumed_future)
 
-        await write_sending_stream_control_message(common_pb2.SendingStreamControl(globalSequenceNumber=msg.globalSequenceNumber))
+        await write_sending_stream_control_message(
+            common_pb2.SendingStreamControl(globalSequenceNumber=msg.globalSequenceNumber)
+        )
 
         async def notify_after_all():
             await asyncio.gather(*consumers_done)
