@@ -132,30 +132,33 @@ class ReaderInstance(Reader):
         # Start a receiving stream to receive the streaming messages over the stream message channel.
         receiving_stream = self.client.receiveStreamMessage()
 
-        async def write_sending_stream_control_message(message: common_pb2.SendingStreamControl) -> None:
-            await receiving_stream.write(message)
+        idx = 0
+
+        async def write_sending_stream_control_message(message: common_pb2.SendingStreamControl = None) -> None:
+            if message is not None:
+                await receiving_stream.write(message)
+            else:
+                nonlocal idx
+                await receiving_stream.write(common_pb2.SendingStreamControl(streamSequenceNumber=idx))
+                idx += 1
 
         # fan out the stream to all iterators
         consumers_done: List[Awaitable[None]] = []
-        idx = 0
 
         stream_iters = fanout_stream(
             receiving_stream,
             len(self.consumers),
-            lambda: write_sending_stream_control_message(common_pb2.SendingStreamControl(streamSequenceNumber=idx)),
+            lambda: write_sending_stream_control_message(),
         )
 
         for consumer in self.consumers:
             consumed_future = asyncio.Future()
 
-            def done(fut=consumed_future):
-                if not fut.done():
-                    fut.set_result(None)
-
             substream = stream_iters.pop()
             assert substream is not None
-            consumers_done.append(consumer.push_stream(substream, done))
-            idx += 1
+
+            asyncio.create_task(consumer.push_stream(substream, lambda: consumed_future.set_result(None)))
+            consumers_done.append(consumed_future)
 
         await write_sending_stream_control_message(common_pb2.SendingStreamControl(globalSequenceNumber=msg.globalSequenceNumber))
 

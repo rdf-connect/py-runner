@@ -110,7 +110,7 @@ class Runner:
         elif message.HasField('processed'):
             # Handle the processed acknowledgment from the orchestrator.
             self.logger.debug(
-                "Received processed acknowledgment from orchestrator for channel " + message.processed.channel)
+                "Received message processed acknowledgment from orchestrator for channel " + message.processed.channel)
             writer = self._writers.get(message.processed.channel)
             if writer:
                 writer.handled()
@@ -168,34 +168,29 @@ class Runner:
             processors_ended = asyncio.Future()
 
             async def listen_to_normal_stream():
-                try:
-                    async for msg in normal_stream:
-                        ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
-                        # containing the full expanded pipeline in Turtle format.
-                        if msg.HasField('pipeline'):
-                            self.pipeline = msg.pipeline
-                            self.logger.debug("Pipeline received")
+                async for msg in normal_stream:
+                    ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
+                    # containing the full expanded pipeline in Turtle format.
+                    if msg.HasField('pipeline'):
+                        self.pipeline = msg.pipeline
+                        self.logger.debug("Pipeline received")
 
-                        ### 2. The orchestrator sends an RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
-                        elif msg.HasField('proc'):
-                            await self.add_processor(msg.proc)
+                    ### 2. The orchestrator sends an RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
+                    elif msg.HasField('proc'):
+                        await self.add_processor(msg.proc)
 
-                        ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
-                        elif msg.HasField('start'):
-                            # Execute the start function of each processor instantiation.
-                            asyncio.create_task(self.start()).add_done_callback(
-                                # Wait (in the background) until all processors are done executing, and then resolve the task.
-                                lambda _: processors_ended.done() or processors_ended.set_result(True)
-                            )
+                    ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
+                    elif msg.HasField('start'):
+                        # Execute the start function of each processor instantiation.
+                        asyncio.create_task(self.start()).add_done_callback(
+                            # Wait (in the background) until all processors are done executing, and then resolve the task.
+                            lambda _: processors_ended.set_result(True)
+                        )
 
-                        ### 4. Handle incoming messages by the orchestrator. (6.2.2 / 6.3.4)
-                        else:
-                            await self.handle_orchestrator_message(msg)
-                    self.logger.debug("Stream ended")
-                except Exception as e:
-                    self.logger.error(f"Error in normal stream listener: {e}")
-                    if not processors_ended.done():
-                        processors_ended.set_result(False)
+                    ### 4. Handle incoming messages by the orchestrator. (6.2.2 / 6.3.4)
+                    else:
+                        await self.handle_orchestrator_message(msg)
+                self.logger.debug("Stream ended")
 
             # Run listener concurrently in the background
             asyncio.create_task(listen_to_normal_stream())

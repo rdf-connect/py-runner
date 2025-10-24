@@ -46,10 +46,10 @@ class Writer(ABC):
 
 ### Implementations ###
 class WriterInstance(Writer):
-    local_sequence_number: int = 1
-    awaiting_processed: list[asyncio.Future] = []
-    open_streams: int = 0
-    should_close: list[asyncio.Future] = []
+    local_sequence_number: int
+    awaiting_processed: list[asyncio.Future]
+    open_streams: int
+    should_close: list[asyncio.Future]
 
     def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, runner_id: str,
                  logger: Logger):
@@ -58,6 +58,10 @@ class WriterInstance(Writer):
         self.notify_orchestrator = notify_orchestrator
         self.runner_id = runner_id
         self.logger = logger
+        self.local_sequence_number = 1
+        self.awaiting_processed = []
+        self.open_streams = 0
+        self.should_close = []
 
     @property
     def uri(self) -> str:
@@ -73,7 +77,7 @@ class WriterInstance(Writer):
     async def stream(self, buffer: AsyncIterable, transform: Optional[Callable[[object], bytes]] = None):
         """Write a stream of bytes to the writer."""
         self.open_streams += 1
-        transform = transform or (lambda x: x if isinstance(x, bytes) else bytes(x, 'utf-8'))
+        transform = transform or (lambda x: x if isinstance(x, bytes) else str(x).encode('utf-8'))
 
         # Initiate a sending stream with an RPC.sendStreamMessage. (6.3.4.3)
         sending_stream = self.client.sendStreamMessage()
@@ -92,35 +96,24 @@ class WriterInstance(Writer):
             )
         )
 
-        id_future = asyncio.Future()
-
-        async def read_id():
-            try:
-                async for chunk in sending_stream:
-                    id_future.set_result(chunk.streamSequenceNumber)
-                    break
-            except Exception as e:
-                id_future.set_exception(e)
-
-        asyncio.create_task(read_id())
-
         # Wait for the first message which contains the ID
-        msg_id = await id_future
+        msg_id = await self.sending_stream_ready(sending_stream=sending_stream)
 
         self.logger.debug(f"{self.uri} streams message with id {msg_id}")
 
         async for msg in buffer:
-            chunk_processed_future = asyncio.Future()
 
-            async def process_chunk():
+            async def await_processed_chunk_control_msg():
+                chunk_processed_future = asyncio.Future()
                 try:
                     async for _ in sending_stream:
                         chunk_processed_future.set_result(None)
                         break
                 except Exception as e:
                     chunk_processed_future.set_exception(e)
+                return chunk_processed_future
 
-            asyncio.create_task(process_chunk())
+            chunk_processed_future = asyncio.create_task(await_processed_chunk_control_msg())
 
             await sending_stream.write(
                 common_pb2.StreamChunk(
@@ -175,6 +168,21 @@ class WriterInstance(Writer):
         event = asyncio.Future()
         self.awaiting_processed.append(event)
         return event
+
+    def sending_stream_ready(self, sending_stream: AsyncIterable) -> None:
+        """Wait until the sending stream is ready, and return its stream sequence number."""
+        id_future = asyncio.Future()
+
+        async def read_id():
+            try:
+                async for chunk in sending_stream:
+                    id_future.set_result(chunk.streamSequenceNumber)
+                    break
+            except Exception as e:
+                id_future.set_exception(e)
+
+        asyncio.create_task(read_id())
+        return id_future
 
     async def close(self, issued: bool = False) -> None:
         """

@@ -97,7 +97,7 @@ def fanout_stream(
                     elif ended:
                         break
                     else:
-                        waiter: asyncio.Future[T | None] = asyncio.get_event_loop().create_future()
+                        waiter: asyncio.Future[T | None] = asyncio.Future()
                         pending.append(waiter)
                         chunk = await waiter
                         if chunk is None:
@@ -107,7 +107,6 @@ def fanout_stream(
             finally:
                 active_consumers -= 1
                 if active_consumers == 0:
-                    # must be awaited because it's async
                     end()
 
         return generator()
