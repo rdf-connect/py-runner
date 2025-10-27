@@ -3,8 +3,7 @@ import logging
 from logging import getLogger
 from typing import Optional
 
-from rdfc_proto import log_pb2
-from rdfc_proto import service_pb2_grpc
+from rdfc_proto import service_pb2_grpc, service_pb2
 
 
 class Logger:
@@ -25,7 +24,7 @@ class Logger:
                 logging.Handler.__init__(self)
 
             def emit(self, record) -> None:
-                log_message = log_pb2.LogMessage(
+                log_message = service_pb2.LogMessage(
                     level=record.levelname.lower(),
                     msg=record.getMessage(),
                     entities=[logger_ref._uri] + record.name.split('.')[1:],

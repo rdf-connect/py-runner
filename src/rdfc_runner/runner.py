@@ -5,7 +5,7 @@ from logging import getLogger, Logger
 from typing import List, Awaitable, Any, Dict
 
 import grpc.aio
-from rdfc_proto import service_pb2_grpc, orchestrator_pb2, runner_pb2, common_pb2
+from rdfc_proto import service_pb2_grpc, service_pb2
 
 from .logger import Logger as GrpcLogger
 from .processor import Processor
@@ -16,8 +16,8 @@ from .writer import Writer, WriterInstance
 
 
 class Runner:
-    _readers: dict[str, List[Reader]]
-    _writers: dict[str, List[Writer]]
+    _readers: dict[str, Reader]
+    _writers: dict[str, Writer]
     _client: service_pb2_grpc.RunnerStub
     _write: Writable
 
@@ -42,14 +42,14 @@ class Runner:
         normal_stream = stub.connect()
 
         # Define async writable function to send messages to the orchestrator.
-        async def writable(msg: orchestrator_pb2.OrchestratorMessage):
+        async def writable(msg: service_pb2.FromRunner):
             await normal_stream.write(msg)
 
         self._write = writable
 
         ### 1.2. Send the initial 'identify' message to the orchestrator.
-        await self._write(orchestrator_pb2.OrchestratorMessage(
-            identify=orchestrator_pb2.Identify(uri=self.uri)
+        await self._write(service_pb2.FromRunner(
+            identify=service_pb2.RunnerIdentify(uri=self.uri)
         ))
 
         return normal_stream
@@ -61,46 +61,65 @@ class Runner:
         self.logger = getLogger('rdfc')
 
     def create_reader(self, uri: str) -> Reader:
-        self._readers.setdefault(uri, [])
-        reader = ReaderInstance(uri, self._client)
-        self._readers[uri].append(reader)
+        reader = ReaderInstance(uri, self._client, self._write, self.logger)
+        self._readers[uri] = reader
         return reader
 
     def create_writer(self, uri: str) -> Writer:
-        self._writers.setdefault(uri, [])
-        writer = WriterInstance(uri, self._client, self._write)
-        self._writers[uri].append(writer)
+        writer = WriterInstance(uri, self._client, self._write, self.uri, self.logger)
+        self._writers[uri] = writer
         return writer
 
-    async def handle_orchestrator_message(self, message: runner_pb2.RunnerMessage):
-        ### 4.1. Handle a RPC.msg normal message received from the orchestrator. (6.2.2.1 / 6.3.4.1)
+    async def handle_orchestrator_message(self, message: service_pb2.ToRunner):
+        ### 4.1. Handle an RPC.msg normal message received from the orchestrator. (6.2.2.1 / 6.3.4.1)
         if message.HasField('msg'):
             # Process the message from the orchestrator.
             self.logger.debug("Received message from orchestrator")
-            # Send the message to each reader consuming this channel.
-            for reader in self._readers.get(message.msg.channel, []):
+            # Send the message to the reader consuming this channel.
+            reader = self._readers.get(message.msg.channel)
+            if reader:
                 reader.handle_msg(message.msg)
+            else:
+                self.logger.error(f"No reader found for channel {message.msg.channel} to handle msg.")
 
         ### 4.2. Handle a RPC.streamMsg streaming message received from the orchestrator. (6.2.2.2 / 6.4.4.2)
         elif message.HasField('streamMsg'):
             # Process the stream message from the orchestrator.
             self.logger.debug("Received stream message from orchestrator")
-            # For each reader consuming the channel: set up a receiving stream to receive the stream message
+            # For the reader consuming the channel: set up a receiving stream to receive the stream message
             # from the orchestrator and send it to the processor's reader instance.
-            for reader in self._readers.get(message.streamMsg.channel, []):
-                reader.handle_streaming_msg(message.streamMsg)
+            reader = self._readers.get(message.streamMsg.channel)
+            if reader:
+                await reader.handle_streaming_msg(message.streamMsg)
+            else:
+                self.logger.error(f"No reader found for channel {message.streamMsg.channel} to handle streaming msg.")
 
         elif message.HasField('close'):
             # Handle the close message from the orchestrator.
             self.logger.info("Received close message from orchestrator, shutting down.")
-            for reader in self._readers.get(message.close.channel, []):
+            reader = self._readers.get(message.close.channel)
+            if reader:
                 reader.close()
-            for writer in self._writers.get(message.close.channel, []):
+            else:
+                self.logger.error(f"No reader found for channel {message.close.channel} to handle close.")
+            writer = self._writers.get(message.close.channel)
+            if writer:
                 await writer.close(True)
+            else:
+                self.logger.error(f"No writer found for channel {message.close.channel} to handle close.")
+        elif message.HasField('processed'):
+            # Handle the processed acknowledgment from the orchestrator.
+            self.logger.debug(
+                "Received message processed acknowledgment from orchestrator for channel " + message.processed.channel)
+            writer = self._writers.get(message.processed.channel)
+            if writer:
+                writer.handled()
+            else:
+                self.logger.error(f"No writer found for channel {message.processed.channel} to handle processed ack.")
         else:
-            self.logger.warning("Received unknown message type from orchestrator.")
+            self.logger.error("Received unknown message type from orchestrator.")
 
-    async def add_processor(self, processor: runner_pb2.Processor):
+    async def add_processor(self, processor: service_pb2.Processor):
         # Start the processor with the given configuration.
         self.logger.debug(f"Adding processor {processor.uri}")
         args = AttrDict(parse_args(processor.arguments, self))
@@ -117,16 +136,12 @@ class Runner:
         self.logger.info(f"Processor {processor.uri} initialized")
 
         self._processors.append(instance)
-        self._processor_transforms.append(instance.transform())
+        self._processor_transforms.append(asyncio.create_task(instance.transform()))
 
-        ### 2.1. Notify the orchestrator that the processor is successfully initiated using a RPC.init message.
-        await self._write(orchestrator_pb2.OrchestratorMessage(init=orchestrator_pb2.ProcessorInit(uri=processor.uri)))
+        ### 2.1. Notify the orchestrator that the processor is successfully initiated using an RPC.init message.
+        await self._write(service_pb2.FromRunner(initialized=service_pb2.ProcessorInitialized(uri=processor.uri)))
 
         return instance
-
-    async def handle_message(self, message: common_pb2.Message):
-        # Get the readers attached to the message channel.
-        pass
 
     async def listen_to_normal_stream(self, normal_stream):
         async for message in normal_stream:
@@ -153,33 +168,29 @@ class Runner:
             processors_ended = asyncio.Future()
 
             async def listen_to_normal_stream():
-                try:
-                    async for msg in normal_stream:
-                        ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
-                        # containing the full expanded pipeline in Turtle format.
-                        if msg.HasField('pipeline'):
-                            self.pipeline = msg.pipeline
-                            self.logger.debug("Pipeline received")
+                async for msg in normal_stream:
+                    ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
+                    # containing the full expanded pipeline in Turtle format.
+                    if msg.HasField('pipeline'):
+                        self.pipeline = msg.pipeline
+                        self.logger.debug("Pipeline received")
 
-                        ### 2. The orchestrator sends a RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
-                        elif msg.HasField('proc'):
-                            await self.add_processor(msg.proc)
+                    ### 2. The orchestrator sends an RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
+                    elif msg.HasField('proc'):
+                        await self.add_processor(msg.proc)
 
-                        ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
-                        elif msg.HasField('start'):
-                            # Execute the start function of each processor instantiation.
-                            asyncio.create_task(self.start()).add_done_callback(
-                                # Wait (in the background) until all processors are done executing, and then resolve the task.
-                                lambda _: processors_ended.set_result(True)
-                            )
+                    ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
+                    elif msg.HasField('start'):
+                        # Execute the start function of each processor instantiation.
+                        asyncio.create_task(self.start()).add_done_callback(
+                            # Wait (in the background) until all processors are done executing, and then resolve the task.
+                            lambda _: processors_ended.set_result(True)
+                        )
 
-                        ### 4. Handle incoming messages by the orchestrator. (6.2.2 / 6.3.4)
-                        else:
-                            await self.handle_orchestrator_message(msg)
-                    self.logger.debug("Stream ended")
-                except Exception as e:
-                    self.logger.error(f"Error in normal stream listener: {e}")
-                    processors_ended.set_result(False)
+                    ### 4. Handle incoming messages by the orchestrator. (6.2.2 / 6.3.4)
+                    else:
+                        await self.handle_orchestrator_message(msg)
+                self.logger.debug("Stream ended")
 
             # Run listener concurrently in the background
             asyncio.create_task(listen_to_normal_stream())

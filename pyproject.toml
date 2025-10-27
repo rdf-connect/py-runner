@@ -1,6 +1,6 @@
 [project]
 name = "rdfc_runner"
-version = "0.0.3"
+version = "1.0.0"
 description = "Python runner for RDF-Connect"
 authors = [
     { name = "Ieben Smessaert", email = "ieben.smessaert@ugent.be" }
@@ -12,7 +12,7 @@ dependencies = [
     "grpcio>=1.74.0",
     "grpcio-tools>=1.74.0",
     "protobuf>=6.31.1",
-    "rdfc-proto>=0.0.1",
+    "rdfc-proto>=1.0.0",
     "types-protobuf>=6.30.2.20250703",
 ]
 
