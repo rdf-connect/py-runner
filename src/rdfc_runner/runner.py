@@ -96,7 +96,7 @@ class Runner:
 
         elif message.HasField('close'):
             # Handle the close message from the orchestrator.
-            self.logger.info("Received close message from orchestrator, shutting down.")
+            self.logger.info("Received close message from orchestrator")
             reader = self._readers.get(message.close.channel)
             if reader:
                 reader.close()
