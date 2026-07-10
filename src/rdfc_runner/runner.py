@@ -28,7 +28,7 @@ class Runner:
     _processors: List[Processor]
     _processor_transforms: List[Awaitable[Any]]
 
-    def __init__(self, runner_iri: str):
+    def __init__(self, runner_iri: str, state=None, runner_id: str | None = None):
         self.uri = runner_iri
         self.pipeline = None
         self._readers = dict()
@@ -36,6 +36,9 @@ class Runner:
         self._processors = []
         self._processor_transforms = []
         self._grpc_logger = None
+        # Optional server-mode statistics (rdfc_runner.server.state.State).
+        self._state = state
+        self._runner_id = runner_id
 
     async def connect(self, stub: service_pb2_grpc.RunnerStub):
         self._client = stub
@@ -62,13 +65,20 @@ class Runner:
         self.logger = getLogger('rdfc')
         spawn_logged(self._grpc_logger.run(), getLogger(__name__), "gRPC log stream")
 
+    def _track_channel(self, uri: str, role: str):
+        if self._state is not None and self._runner_id is not None:
+            return self._state.track_channel(self._runner_id, uri, role)
+        return None
+
     def create_reader(self, uri: str) -> Reader:
-        reader = ReaderInstance(uri, self._client, self._write, self.logger)
+        reader = ReaderInstance(uri, self._client, self._write, self.logger,
+                                tracker=self._track_channel(uri, "reader"))
         self._readers[uri] = reader
         return reader
 
     def create_writer(self, uri: str) -> Writer:
-        writer = WriterInstance(uri, self._client, self._write, self.uri, self.logger)
+        writer = WriterInstance(uri, self._client, self._write, self.uri, self.logger,
+                                tracker=self._track_channel(uri, "writer"))
         self._writers[uri] = writer
         return writer
 
@@ -183,6 +193,15 @@ class Runner:
         self.initiate_logger(stub)
         self.logger.info("Runner started and logger initiated.")
 
+        try:
+            await self._run_with_stub(stub)
+        finally:
+            # Terminate the log stream so its background task completes, even when the
+            # runner is cancelled before or during the connect handshake.
+            if self._grpc_logger is not None:
+                self._grpc_logger.close()
+
+    async def _run_with_stub(self, stub: service_pb2_grpc.RunnerStub):
         ### 1. Connect to the orchestrator and identify the runner to the orchestrator. (6.2.1.2 / 6.3.2)
         normal_stream = await self.connect(stub)
 
@@ -247,6 +266,3 @@ class Runner:
         finally:
             if not listener_task.done():
                 listener_task.cancel()
-            if self._grpc_logger is not None:
-                # Terminate the log stream so its background task completes.
-                self._grpc_logger.close()
