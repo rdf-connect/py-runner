@@ -51,6 +51,67 @@ async def _source(chunks):
         yield chunk
 
 
+async def test_fanout_stream_delivers_all_chunks_to_all_consumers():
+    # Regression test: when the producer runs ahead of the consumers, every chunk
+    # must still be delivered exactly once to each consumer.
+    handled = 0
+
+    def on_all_handled():
+        nonlocal handled
+        handled += 1
+
+    consumers = fanout_stream(_source([b"a", b"b", b"c"]), 2, on_all_handled)
+
+    async def collect(gen):
+        return [chunk async for chunk in gen]
+
+    results = await asyncio.gather(*(collect(c) for c in consumers))
+
+    assert results == [[b"a", b"b", b"c"], [b"a", b"b", b"c"]]
+    assert handled == 3
+
+
+async def test_fanout_stream_async_ack_and_slow_consumer():
+    acks = []
+
+    async def on_all_handled():
+        acks.append(True)
+
+    consumers = fanout_stream(_source([1, 2, 3, 4]), 2, on_all_handled)
+
+    async def fast(gen):
+        return [chunk async for chunk in gen]
+
+    async def slow(gen):
+        chunks = []
+        async for chunk in gen:
+            await asyncio.sleep(0.001)
+            chunks.append(chunk)
+        return chunks
+
+    results = await asyncio.gather(fast(consumers[0]), slow(consumers[1]))
+
+    assert results == [[1, 2, 3, 4], [1, 2, 3, 4]]
+    assert len(acks) == 4
+
+
+async def test_fanout_stream_consumer_exiting_early_does_not_stall_others():
+    consumers = fanout_stream(_source([1, 2, 3]), 2, lambda: None)
+
+    async def take_one(gen):
+        async for chunk in gen:
+            await gen.aclose()
+            return [chunk]
+
+    async def take_all(gen):
+        return [chunk async for chunk in gen]
+
+    first, rest = await asyncio.gather(take_one(consumers[0]), take_all(consumers[1]))
+
+    assert first == [1]
+    assert rest == [1, 2, 3]
+
+
 async def test_fanout_stream_single_consumer_empty_stream():
     consumers = fanout_stream(_source([]), 1, lambda: None)
 

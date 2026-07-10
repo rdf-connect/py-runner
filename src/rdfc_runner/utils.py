@@ -1,8 +1,24 @@
 import asyncio
 import json
-from typing import AsyncGenerator, TypeVar, Callable, List, Awaitable
+from logging import Logger, getLogger
+from typing import AsyncGenerator, TypeVar, Callable, List, Awaitable, Coroutine, Any
 
 T = TypeVar("T")
+
+
+def spawn_logged(coro: Coroutine[Any, Any, Any], logger: Logger, what: str) -> asyncio.Task:
+    """Schedule a fire-and-forget coroutine as a task, logging any exception it raises."""
+    task = asyncio.create_task(coro)
+
+    def _report(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error(f"Background task '{what}' failed: {exc!r}")
+
+    task.add_done_callback(_report)
+    return task
 
 
 def parse_args(args, runner: "Runner"):
@@ -44,71 +60,58 @@ def fanout_stream(
     num_consumers: int,
     on_all_handled: Callable[[], Awaitable[None]] | Callable[[], None],
 ) -> List[AsyncGenerator[T, None]]:
-    """Duplicate an async generator stream for multiple consumers, waiting for all to handle each chunk."""
+    """Duplicate an async generator stream for multiple consumers, waiting for all to handle each chunk.
 
-    buffer: List[T] = []
-    pending: List[asyncio.Future[T | None]] = []
-    ended = False
-    awaiting_ack = 0
-    active_consumers = num_consumers
+    Chunks are delivered one at a time: once every (still active) consumer has finished handling
+    the current chunk, `on_all_handled` is invoked and only then is the next chunk read from the
+    source. Consumers that stop iterating early are excluded from the barrier.
+    """
 
-    def flush() -> None:
-        nonlocal awaiting_ack
-        while buffer and pending:
-            chunk = buffer[0]
-            waiter = pending.pop(0)
-            waiter.set_result(chunk)
-            awaiting_ack += 1
+    _end = object()  # Sentinel signalling the end of the stream.
+    queues: List[asyncio.Queue] = [asyncio.Queue() for _ in range(num_consumers)]
+    active: set[int] = set(range(num_consumers))
+    pending: set[int] = set()
+    chunk_handled: asyncio.Event | None = None
 
-    def end() -> None:
-        nonlocal ended
-        ended = True
-        while pending:
-            waiter = pending.pop(0)
-            waiter.set_result(None)
-
-    async def ack() -> None:
-        nonlocal awaiting_ack
-        awaiting_ack -= 1
-        if awaiting_ack == 0 and buffer:
-            buffer.pop(0)
+    async def mark_handled(consumer_id: int) -> None:
+        pending.discard(consumer_id)
+        if not pending and chunk_handled is not None and not chunk_handled.is_set():
             result = on_all_handled()
             if asyncio.iscoroutine(result):
                 await result
-            flush()
+            chunk_handled.set()
 
     async def pump_source() -> None:
+        nonlocal pending, chunk_handled
         try:
             async for chunk in stream:
-                buffer.append(chunk)
-                flush()
+                if not active:
+                    break
+                pending = set(active)
+                chunk_handled = asyncio.Event()
+                for consumer_id in pending:
+                    queues[consumer_id].put_nowait(chunk)
+                await chunk_handled.wait()
         finally:
-            end()
+            for consumer_id in set(active):
+                queues[consumer_id].put_nowait(_end)
 
-    asyncio.create_task(pump_source())
+    spawn_logged(pump_source(), getLogger("rdfc"), "fanout stream pump")
 
-    def make_iterable() -> AsyncGenerator[T, None]:
+    def make_iterable(consumer_id: int) -> AsyncGenerator[T, None]:
         async def generator() -> AsyncGenerator[T, None]:
-            nonlocal active_consumers
             try:
                 while True:
-                    if buffer:
-                        chunk = buffer[0]
-                    elif ended:
+                    chunk = await queues[consumer_id].get()
+                    if chunk is _end:
                         break
-                    else:
-                        waiter: asyncio.Future[T | None] = asyncio.Future()
-                        pending.append(waiter)
-                        chunk = await waiter
-                        if chunk is None:
-                            break
                     yield chunk
-                    await ack()
+                    await mark_handled(consumer_id)
             finally:
-                active_consumers -= 1
-                if active_consumers == 0:
-                    end()
+                # Drop this consumer from the barrier so an early exit does not stall the others.
+                active.discard(consumer_id)
+                await mark_handled(consumer_id)
 
         return generator()
 
-    return [make_iterable() for _ in range(num_consumers)]
+    return [make_iterable(consumer_id) for consumer_id in range(num_consumers)]
