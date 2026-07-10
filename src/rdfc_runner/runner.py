@@ -35,6 +35,7 @@ class Runner:
         self._writers = dict()
         self._processors = []
         self._processor_transforms = []
+        self._grpc_logger = None
 
     async def connect(self, stub: service_pb2_grpc.RunnerStub):
         self._client = stub
@@ -57,9 +58,9 @@ class Runner:
 
     def initiate_logger(self, stub: service_pb2_grpc.RunnerStub):
         # Initiate the RPC.logStream log stream to the orchestrator by creating a logger iterator.
-        logger = GrpcLogger(stub, self.uri)
+        self._grpc_logger = GrpcLogger(stub, self.uri)
         self.logger = getLogger('rdfc')
-        spawn_logged(logger.run(), getLogger(__name__), "gRPC log stream")
+        spawn_logged(self._grpc_logger.run(), getLogger(__name__), "gRPC log stream")
 
     def create_reader(self, uri: str) -> Reader:
         reader = ReaderInstance(uri, self._client, self._write, self.logger)
@@ -166,71 +167,86 @@ class Runner:
     async def run(self, grpc_url: str):
         # Connect with the Orchestrator's gRPC server.
         async with grpc.aio.insecure_channel(grpc_url) as channel:
-            # Create a stub (client)
-            stub = service_pb2_grpc.RunnerStub(channel)
+            await self.run_with_channel(channel)
 
-            # Initiate the logger
-            self.initiate_logger(stub)
-            self.logger.info("Runner started and logger initiated.")
+    async def run_with_channel(self, channel: grpc.aio.Channel):
+        """Run the runner over an already-established gRPC channel.
 
-            ### 1. Connect to the orchestrator and identify the runner to the orchestrator. (6.2.1.2 / 6.3.2)
-            normal_stream = await self.connect(stub)
+        The caller owns the channel and is responsible for closing it. This allows serving
+        runners over transports other than a freshly dialed connection (e.g. the remote
+        runner server, which bridges an orchestrator-initiated TCP socket into a channel).
+        """
+        # Create a stub (client)
+        stub = service_pb2_grpc.RunnerStub(channel)
 
-            # Await all processors to finish
-            processors_ended = asyncio.Future()
+        # Initiate the logger
+        self.initiate_logger(stub)
+        self.logger.info("Runner started and logger initiated.")
 
-            def on_start_done(task: asyncio.Task) -> None:
-                # Resolve `processors_ended` with the outcome of `start()`, propagating failures.
-                if processors_ended.done():
-                    return
-                if task.cancelled():
-                    processors_ended.cancel()
-                elif task.exception() is not None:
-                    processors_ended.set_exception(task.exception())
-                else:
-                    processors_ended.set_result(True)
+        ### 1. Connect to the orchestrator and identify the runner to the orchestrator. (6.2.1.2 / 6.3.2)
+        normal_stream = await self.connect(stub)
 
-            async def listen_to_normal_stream():
-                try:
-                    async for msg in normal_stream:
-                        ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
-                        # containing the full expanded pipeline in Turtle format.
-                        if msg.HasField('pipeline'):
-                            self.pipeline = msg.pipeline
-                            self.logger.debug("Pipeline received")
+        # Await all processors to finish
+        processors_ended = asyncio.Future()
 
-                        ### 2. The orchestrator sends an RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
-                        elif msg.HasField('proc'):
-                            await self.add_processor(msg.proc)
+        def on_start_done(task: asyncio.Task) -> None:
+            # Resolve `processors_ended` with the outcome of `start()`, propagating failures.
+            if processors_ended.done():
+                return
+            if task.cancelled():
+                processors_ended.cancel()
+            elif task.exception() is not None:
+                processors_ended.set_exception(task.exception())
+            else:
+                processors_ended.set_result(True)
 
-                        ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
-                        elif msg.HasField('start'):
-                            # Execute the start function of each processor instantiation.
-                            # Wait (in the background) until all processors are done executing, and then resolve the task.
-                            asyncio.create_task(self.start()).add_done_callback(on_start_done)
+        async def listen_to_normal_stream():
+            try:
+                async for msg in normal_stream:
+                    ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
+                    # containing the full expanded pipeline in Turtle format.
+                    if msg.HasField('pipeline'):
+                        self.pipeline = msg.pipeline
+                        self.logger.debug("Pipeline received")
 
-                        ### 4. Handle incoming messages by the orchestrator. (6.2.2 / 6.3.4)
-                        else:
-                            await self.handle_orchestrator_message(msg)
-                    self.logger.debug("Stream ended")
-                    if not processors_ended.done():
-                        # The orchestrator went away before the pipeline completed; unblock `run`.
-                        processors_ended.set_exception(
-                            ConnectionError("Orchestrator stream ended before the pipeline completed")
-                        )
-                except Exception as e:
-                    if not processors_ended.done():
-                        processors_ended.set_exception(e)
+                    ### 2. The orchestrator sends an RPC.proc message for each processor the runner should initiate. (6.2.1.3 / 6.3.3)
+                    elif msg.HasField('proc'):
+                        await self.add_processor(msg.proc)
+
+                    ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
+                    elif msg.HasField('start'):
+                        # Execute the start function of each processor instantiation.
+                        # Wait (in the background) until all processors are done executing, and then resolve the task.
+                        asyncio.create_task(self.start()).add_done_callback(on_start_done)
+
+                    ### 4. Handle incoming messages by the orchestrator. (6.2.2 / 6.3.4)
                     else:
-                        raise
+                        await self.handle_orchestrator_message(msg)
+                self.logger.debug("Stream ended")
+                if not processors_ended.done():
+                    # The orchestrator went away before the pipeline completed; unblock `run`.
+                    processors_ended.set_exception(
+                        ConnectionError("Orchestrator stream ended before the pipeline completed")
+                    )
+            except Exception as e:
+                if not processors_ended.done():
+                    processors_ended.set_exception(e)
+                else:
+                    raise
 
-            # Run listener concurrently in the background
-            spawn_logged(listen_to_normal_stream(), self.logger, "orchestrator stream listener")
+        # Run listener concurrently in the background
+        listener_task = spawn_logged(listen_to_normal_stream(), self.logger, "orchestrator stream listener")
 
+        try:
             ### 5. Wait till all processors complete their execution.
             await processors_ended
             self.logger.debug("Processors ended")
 
             ### 6. Close the normal stream to signal completion.
             await normal_stream.done_writing()
-            await channel.close()
+        finally:
+            if not listener_task.done():
+                listener_task.cancel()
+            if self._grpc_logger is not None:
+                # Terminate the log stream so its background task completes.
+                self._grpc_logger.close()
