@@ -1,0 +1,23 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix runner: <http://localhost:3000/>.
+
+### Import the remote runner and its processors, served by the py-runner server.
+<> owl:imports runner:, runner:processors.ttl.
+
+<> a rdfc:Pipeline;
+  rdfc:consistsOf [
+    rdfc:processor <sendProc>, <echoProc>, <logProc>;
+    rdfc:instantiates runner:pyRunner;
+  ].
+
+<sendProc> a rdfc:PySendProcessor;
+  rdfc:msg "Hello", "World";
+  rdfc:writer <raw>.
+
+<echoProc> a rdfc:PyEchoProcessor;
+  rdfc:reader <raw>;
+  rdfc:writer <data>.
+
+<logProc> a rdfc:PyLogProcessor;
+  rdfc:reader <data>.

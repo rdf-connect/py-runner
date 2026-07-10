@@ -1,0 +1,9 @@
+services:
+  py-runner:
+    build:
+      context: ../..
+    ports:
+      - "3000:3000"   # HTTP: index.ttl, processor configs, /health, /dashboard
+      - "50051:50051" # gRPC: orchestrator-initiated runner connections
+    volumes:
+      - .:/config:ro
