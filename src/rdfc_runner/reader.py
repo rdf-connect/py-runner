@@ -59,11 +59,13 @@ class Reader(ABC):
 
 ### Implementations ###
 class ReaderInstance(Reader):
-    def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, logger: Logger):
+    def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, logger: Logger,
+                 tracker=None):
         self._uri = uri
         self.client = client
         self.notify_orchestrator = notify_orchestrator
         self.logger = logger
+        self.tracker = tracker
         self.consumers: List[MyIter] = []
 
     @property
@@ -98,6 +100,8 @@ class ReaderInstance(Reader):
     def handle_msg(self, msg: common_pb2.ReceivingMessage):
         """Handle a message from the orchestrator."""
         self.logger.debug(f"{self.uri} handling incoming message of {len(msg.data)} bytes")
+        if self.tracker:
+            self.tracker.record_message(len(msg.data))
 
         async def push_to_consumer(consumer: MyIter, data: bytes):
             future = asyncio.Future()
@@ -142,11 +146,17 @@ class ReaderInstance(Reader):
                 await receiving_stream.write(common_pb2.SendingStreamControl(streamSequenceNumber=idx))
                 idx += 1
 
+        async def tracked_chunks():
+            async for chunk in receiving_stream:
+                if self.tracker:
+                    self.tracker.record_message(len(chunk.data))
+                yield chunk
+
         # fan out the stream to all iterators
         consumers_done: List[Awaitable[None]] = []
 
         stream_iters = fanout_stream(
-            receiving_stream,
+            tracked_chunks(),
             len(self.consumers),
             write_sending_stream_control_message,
         )

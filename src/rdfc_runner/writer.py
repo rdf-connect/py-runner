@@ -1,4 +1,5 @@
 import asyncio
+import time
 from abc import abstractmethod, ABC
 from collections.abc import Callable
 from logging import Logger
@@ -47,17 +48,18 @@ class Writer(ABC):
 ### Implementations ###
 class WriterInstance(Writer):
     local_sequence_number: int
-    awaiting_processed: list[asyncio.Future]
+    awaiting_processed: list[tuple[asyncio.Future, float, int]]
     open_streams: int
     should_close: list[asyncio.Future]
 
     def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, runner_id: str,
-                 logger: Logger):
+                 logger: Logger, tracker=None):
         self._uri = uri
         self.client = client
         self.notify_orchestrator = notify_orchestrator
         self.runner_id = runner_id
         self.logger = logger
+        self.tracker = tracker
         self.local_sequence_number = 1
         self.awaiting_processed = []
         self.open_streams = 0
@@ -129,7 +131,7 @@ class WriterInstance(Writer):
         # Send the message as an RPC.msg over the normal stream. (6.3.4.3)
         local_sequence_number = self.local_sequence_number
         self.local_sequence_number += 1
-        processed_msg_future = self.await_processed()
+        processed_msg_future = self.await_processed(len(buffer))
 
         msg = common_pb2.SendingMessage(
             localSequenceNumber=local_sequence_number,
@@ -154,10 +156,10 @@ class WriterInstance(Writer):
         else:
             raise ValueError("Unsupported AnyType object")
 
-    def await_processed(self) -> asyncio.Future:
+    def await_processed(self, num_bytes: int = 0) -> asyncio.Future:
         """Wait until all messages sent to the writer are processed."""
         event = asyncio.Future()
-        self.awaiting_processed.append(event)
+        self.awaiting_processed.append((event, time.monotonic(), num_bytes))
         return event
 
     async def sending_stream_ready(self, sending_stream: AsyncIterable) -> int:
@@ -203,7 +205,9 @@ class WriterInstance(Writer):
     def handled(self):
         """Notify that a message has been processed."""
         if len(self.awaiting_processed) > 0:
-            event = self.awaiting_processed.pop(0)
+            event, started_at, num_bytes = self.awaiting_processed.pop(0)
+            if self.tracker:
+                self.tracker.record_message(num_bytes, (time.monotonic() - started_at) * 1000)
             if not event.done():
                 event.set_result(None)
         else:

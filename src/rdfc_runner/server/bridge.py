@@ -135,13 +135,14 @@ class SocketBridge:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._channel is not None:
             await self._channel.close()
-        if self._unix_server is not None:
-            self._unix_server.close()
-            await self._unix_server.wait_closed()
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-        # Tear down the TCP side even if grpc never dialed.
+        # Close the TCP side before waiting on the unix server: the pump (and thereby the
+        # unix connection handler) cannot finish while the TCP peer holds its side open.
         tcp_writer = self._tcp[1]
         if not tcp_writer.is_closing():
             tcp_writer.close()
+        if self._unix_server is not None:
+            self._unix_server.close()
+            await self._unix_server.wait_closed()
         with contextlib.suppress(Exception):
             await tcp_writer.wait_closed()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
