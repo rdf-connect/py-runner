@@ -28,6 +28,99 @@ You can install the Python runner package using the following command:
 uv add rdfc_runner
 ```
 
+## Remote runner server
+
+Instead of letting the orchestrator spawn the runner as a local subprocess (`rdfc:PyRunner` with `rdfc:command`),
+the runner can be hosted as a long-running server — on another machine, or in Docker.
+The server serves the runner definition and its processor configurations over HTTP,
+and instantiates a runner for every incoming orchestrator connection.
+
+Create a Turtle configuration for the server:
+
+```turtle
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+<> a rdfc:PyRunnerServer;
+  rdfc:httpPort 3000;                       # HTTP: index, processor configs, /health, /api/state, /dashboard
+  rdfc:grpcPort 50051;                      # TCP: orchestrator-initiated runner connections
+  rdfc:processorConfig <./processors.ttl>.  # one or more processor configuration files to serve
+```
+
+And start the server (the processor modules referenced by `rdfc:modulePath` must be importable,
+e.g. installed in the environment or on `PYTHONPATH`):
+
+```shell
+PYTHONPATH=processors rdfc-runner-server server.ttl
+```
+
+A pipeline uses the remote runner by importing the runner definition and processor
+configurations from the server, and instantiating the served `rdfc:HttpRunner`:
+
+```turtle
+@prefix owl: <http://www.w3.org/2002/07/owl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix runner: <http://localhost:3000/>.
+
+<> owl:imports runner:, runner:processors.ttl.
+
+<> a rdfc:Pipeline;
+  rdfc:consistsOf [
+    rdfc:processor <logProc>, <sendProc>;
+    rdfc:instantiates runner:pyRunner;
+  ].
+```
+
+The orchestrator derives the runner's host from the runner IRI (`runner:pyRunner` →
+`localhost`), opens a plain TCP connection to `host:grpcPort`, and sends the runner IRI.
+The server then instantiates a runner that communicates over that same connection using
+the regular gRPC protocol — the runner never dials the orchestrator, so only the runner's
+ports need to be reachable. **The hostname in the runner IRI (i.e. in the `runner:` prefix
+of the pipeline) must therefore be reachable from the orchestrator.**
+
+The server exposes some introspection endpoints next to the served configuration files:
+`/health` (status + active connection count), `/api/state` (per-runner status and channel
+statistics as JSON), and `/dashboard` (a live HTML view of the same).
+
+See [`examples/echo`](examples/echo) for a complete example.
+
+## Docker
+
+The repository ships a `Dockerfile` that packages the runner server. The image expects a
+config directory mounted at `/config` containing `server.ttl`, the processor configuration
+files, and the processor modules (added to `PYTHONPATH` via `/config/processors`):
+
+```shell
+docker build -t rdfc/py-runner .
+docker run -p 3000:3000 -p 50051:50051 -v ./examples/echo:/config:ro rdfc/py-runner
+```
+
+Or with the compose example:
+
+```shell
+docker compose -f examples/echo/docker-compose.yml up --build
+```
+
+For real deployments with published processor packages, extend the image instead of mounting code:
+
+```dockerfile
+FROM rdfc/py-runner
+RUN pip install my-processor-package
+COPY server.ttl processors.ttl /config/
+```
+
+Remember that the runner IRI's hostname must resolve from the orchestrator: use
+`@prefix runner: <http://localhost:3000/>.` when the orchestrator runs on the Docker host
+with published ports, or the compose service name (e.g. `http://py-runner:3000/`) when the
+orchestrator runs in the same compose network.
+
+## Testing
+
+The test suite uses [pytest](https://docs.pytest.org):
+
+```shell
+uv run pytest
+```
+
 ## Logging
 
 The Python runner and processors uses the [standard Python logging module](https://docs.python.org/3/library/logging.html) to log messages.
@@ -119,9 +212,12 @@ py-runner/                # Root directory of the project
 │       ├── processor.py  # Abstract base class for Python processors, defining the interface for all Python processors
 │       ├── reader.py     # Contains the main logic for the Python reader
 │       ├── runner.py     # Contains the main logic for the Python runner
+│       ├── server/       # The remote runner server (rdfc-runner-server)
 │       ├── types.py      # Contains type definitions and classes used throughout the package
 │       ├── utils.py      # Utility functions used by the runner
 │       └── writer.py     # Contains the main logic for the Python writer
+├── examples/             # Example configurations (see examples/echo)
 ├── tests/                # Directory for unit tests
+├── Dockerfile            # Docker image for the remote runner server
 └── pyproject.toml        # Project metadata and build configuration
 ```
