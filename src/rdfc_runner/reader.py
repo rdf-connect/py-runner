@@ -10,7 +10,7 @@ from .convertor import AnyType
 from .convertor import StringConvertor, StreamConvertor, NoConvertor, AnyConvertor
 from .iterable import MyIter
 from .types import Writable
-from .utils import fanout_stream
+from .utils import fanout_stream, spawn_logged
 
 
 ### Interface ###
@@ -123,7 +123,7 @@ class ReaderInstance(Reader):
                 )
             )
 
-        asyncio.create_task(push_to_consumers())
+        spawn_logged(push_to_consumers(), self.logger, f"push message to consumers of {self.uri}")
 
     async def handle_streaming_msg(self, msg: common_pb2.ReceivingStreamMessage):
         """Handle a streaming message from the orchestrator."""
@@ -157,7 +157,8 @@ class ReaderInstance(Reader):
             substream = stream_iters.pop()
             assert substream is not None
 
-            asyncio.create_task(consumer.push_stream(substream, lambda: consumed_future.set_result(None)))
+            spawn_logged(consumer.push_stream(substream, lambda: consumed_future.set_result(None)),
+                         self.logger, f"push stream to consumer of {self.uri}")
             consumers_done.append(consumed_future)
 
         await write_sending_stream_control_message(
@@ -176,7 +177,7 @@ class ReaderInstance(Reader):
                 )
             )
 
-        asyncio.create_task(notify_after_all())
+        spawn_logged(notify_after_all(), self.logger, f"streaming message ack for {self.uri}")
 
     def close(self) -> None:
         """Close all iterators."""

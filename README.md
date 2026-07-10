@@ -63,8 +63,8 @@ Additionally, you should implement the `transform` method, which is called befor
 This method should only write to writers as reply to the data it receives from the readers, not produce new data, as it is important that it does not write data to channels before all readers have been initialized and are ready to consume data.
 Finally, you should implement the `produce` method, which is called after the `transform` method. This method is where you can produce (new) output data by writing to writers to send the data to the next step in the pipeline.
 
-Nest to the class, you should define a configuration for the processor in the `processor.ttl` file of your package.
-Python processor configurations must include the Python specific configuration parameters `rdfc:module_path` and `rdfc:class`, which specify the module and class name of the processor.
+Next to the class, you should define a configuration for the processor in the `processor.ttl` file of your package.
+Python processor configurations must include the Python specific configuration parameters `rdfc:modulePath` and `rdfc:class`, which specify the module and class name of the processor.
 
 
 ## Development of the Python Runner
@@ -108,7 +108,7 @@ hatch publish
 ```
 py-runner/                # Root directory of the project
 ├── src/                  # Source code directory
-│   └── rdfc_py_runner/   # Package directory
+│   └── rdfc_runner/      # Package directory
 │       ├── __init__.py   # Package initialization, allows importing as a regular package
 │       ├── __init__.pyi  # Type stub for the package, useful for type checking and IDE support while importing this package
 │       ├── __main__.py   # Main entry point for the package, allows running as a script

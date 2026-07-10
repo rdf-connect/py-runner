@@ -4,7 +4,11 @@ import sys
 from .runner import Runner
 
 
-async def main():
+async def async_main():
+    if len(sys.argv) != 3:
+        print("usage: rdfc-runner <orchestrator-address> <runner-uri>", file=sys.stderr)
+        raise SystemExit(2)
+
     # first argument passed is the URL of the orchestrator's Protobuf server
     # second argument is the IRI that uniquely identifies the runner
     grpc_url = sys.argv[1]
@@ -17,5 +21,9 @@ async def main():
     await runner.run(grpc_url)
 
 
+def main():
+    asyncio.run(async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

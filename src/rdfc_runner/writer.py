@@ -160,7 +160,7 @@ class WriterInstance(Writer):
         self.awaiting_processed.append(event)
         return event
 
-    async def sending_stream_ready(self, sending_stream: AsyncIterable) -> asyncio.Future():
+    async def sending_stream_ready(self, sending_stream: AsyncIterable) -> int:
         """Wait until the sending stream is ready, and return its stream sequence number."""
         async for chunk in sending_stream:
             return chunk.streamSequenceNumber
