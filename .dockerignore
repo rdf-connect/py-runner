@@ -1,0 +1,11 @@
+.git
+.idea
+.venv
+.pytest_cache
+**/__pycache__
+dist
+tests
+examples
+Dockerfile
+.dockerignore
+.DS_Store
