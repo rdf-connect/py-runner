@@ -24,6 +24,16 @@ Issues = "https://github.com/rdf-connect/py-runner/issues"
 [project.scripts]
 rdfc-runner = "rdfc_runner.__main__:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
