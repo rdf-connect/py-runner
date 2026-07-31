@@ -82,6 +82,23 @@ def test_parse_server_config_missing_type(tmp_path):
         parse_server_config(config_path)
 
 
+@pytest.mark.parametrize("prop, value", [
+    ("httpPort", '"80a"'),
+    ("grpcPort", '"not a port"'),
+    ("historySize", '3.0e3'),
+    ("httpPort", '"8080.5"'),
+])
+def test_parse_server_config_rejects_non_integer_numbers(tmp_path, prop, value):
+    config_path = write(tmp_path, "server.ttl", f"""
+        @prefix rdfc: <https://w3id.org/rdf-connect#>.
+        <> a rdfc:PyRunnerServer;
+          rdfc:{prop} {value}.
+    """)
+
+    with pytest.raises(ConfigError, match=f"rdfc:{prop}"):
+        parse_server_config(config_path)
+
+
 def test_parse_server_config_missing_file(tmp_path):
     with pytest.raises(ConfigError, match="not found|Failed to parse"):
         parse_server_config(str(tmp_path / "nope.ttl"))

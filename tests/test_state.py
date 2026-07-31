@@ -87,4 +87,35 @@ def test_channels_of_a_finished_runner_survive():
     state.deregister_runner(runner_id)
 
     [runner] = state.snapshot()
-    assert runner["channels"]["urn:channel"]["messageCount"] == 1
+    assert runner["channels"]["writer:urn:channel"]["messageCount"] == 1
+
+
+def test_reading_and_writing_one_uri_are_tracked_separately():
+    """A pipeline can write and read the same channel inside one runner (the echo example):
+    one record per URI would double-count the messages and hide the reader's row."""
+    state = State()
+    runner_id = state.register_runner("127.0.0.1", "urn:runner")
+
+    state.track_channel(runner_id, "urn:channel", "writer").record_message(10, latency_ms=2.0)
+    state.track_channel(runner_id, "urn:channel", "reader").record_message(10)
+
+    [runner] = state.snapshot()
+    writer = runner["channels"]["writer:urn:channel"]
+    reader = runner["channels"]["reader:urn:channel"]
+    assert (writer["role"], writer["uri"]) == ("writer", "urn:channel")
+    assert (reader["role"], reader["uri"]) == ("reader", "urn:channel")
+    assert writer["messageCount"] == reader["messageCount"] == 1
+    assert writer["latenciesMs"] == [2.0]
+    assert reader["latenciesMs"] == []
+
+
+def test_tracking_the_same_channel_twice_reuses_its_record():
+    state = State()
+    runner_id = state.register_runner("127.0.0.1", "urn:runner")
+
+    state.track_channel(runner_id, "urn:channel", "reader").record_message(1)
+    state.track_channel(runner_id, "urn:channel", "reader").record_message(2)
+
+    [runner] = state.snapshot()
+    assert list(runner["channels"]) == ["reader:urn:channel"]
+    assert runner["channels"]["reader:urn:channel"]["bytesTotal"] == 3

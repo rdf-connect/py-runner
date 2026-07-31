@@ -39,6 +39,7 @@ class RunnerStats:
     disconnected_at: Optional[int] = None
     status: RunnerStatus = "connecting"
     grpc_state: str = "IDLE"
+    #: Keyed by `<role>:<uri>`; the same URI can appear once per role.
     channels: dict[str, ChannelStats] = field(default_factory=dict)
 
     def to_json(self) -> dict:
@@ -50,7 +51,7 @@ class RunnerStats:
             "disconnectedAt": self.disconnected_at,
             "status": self.status,
             "grpcState": self.grpc_state,
-            "channels": {uri: channel.to_json() for uri, channel in self.channels.items()},
+            "channels": {key: channel.to_json() for key, channel in self.channels.items()},
         }
 
 
@@ -122,9 +123,14 @@ class State:
         runner = self._runners.get(runner_id)
         if not runner:
             return ChannelTracker(None)
-        if uri not in runner.channels:
-            runner.channels[uri] = ChannelStats(uri=uri, role=role)
-        return ChannelTracker(runner.channels[uri])
+        # A single channel URI can be read and written inside one runner (a processor feeding
+        # another in the same pipeline), so the role is part of the key. Keying on the URI
+        # alone would merge both directions into one record: one arbitrary role, counts and
+        # bytes summed over both, and reader traffic polluting the writer latencies.
+        key = f"{role}:{uri}"
+        if key not in runner.channels:
+            runner.channels[key] = ChannelStats(uri=uri, role=role)
+        return ChannelTracker(runner.channels[key])
 
     def snapshot(self) -> list[dict]:
         return [runner.to_json() for runner in (*self._runners.values(), *self._history)]

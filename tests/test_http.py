@@ -44,6 +44,40 @@ async def client(server):
     await client.close()
 
 
+async def test_serving_root_is_the_config_directory(tmp_path, monkeypatch):
+    """`rdfc-runner-server /elsewhere/server.ttl` must serve relative to that config file,
+    not to the shell's working directory: the orchestrator resolves the advertised file IRIs
+    against the served document, and '..'-containing IRIs are refused by this very server."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "processors.ttl").write_text(PROCESSORS_TTL)
+    (config_dir / "helper.ttl").write_text("")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    config = ServerConfig(
+        http_port=0,
+        grpc_port=50999,
+        processor_paths=[str(config_dir / "processors.ttl")],
+        config_path=str(config_dir / "server.ttl"),
+        hostname="runner.example",
+    )
+    # Constructed exactly as `serve()` does it, without a cwd to mask the default.
+    server = RunnerServer(config)
+
+    assert server.cwd == str(config_dir)
+
+    client = TestClient(TestServer(server.make_app()))
+    await client.start_server()
+    try:
+        index = await (await client.get("/")).text()
+        assert ".." not in index
+        assert (await client.get("/processors.ttl")).status == 200
+    finally:
+        await client.close()
+
+
 async def test_health(client):
     response = await client.get("/health")
 
