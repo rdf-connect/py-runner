@@ -9,7 +9,13 @@ from google.protobuf import empty_pb2
 from rdfc_proto import service_pb2, service_pb2_grpc
 
 from rdfc_runner.runner import Runner
-from rdfc_runner.server.bridge import HandshakeError, SocketBridge, pump_pair, read_uri_line
+from rdfc_runner.server.bridge import (
+    MAX_URI_BYTES,
+    HandshakeError,
+    SocketBridge,
+    pump_pair,
+    read_uri_line,
+)
 
 
 async def tcp_pair():
@@ -72,6 +78,28 @@ async def test_read_uri_line_eof_before_newline():
 
 
 async def test_read_uri_line_oversized():
+    # A complete line that fits the stream buffer but exceeds MAX_URI_BYTES.
+    (reader, writer), (_, client_writer) = await tcp_pair()
+    client_writer.write(b"x" * (MAX_URI_BYTES + 1) + b"\n")
+
+    with pytest.raises(HandshakeError, match="maximum length"):
+        await read_uri_line(reader)
+    writer.close()
+    client_writer.close()
+
+
+async def test_read_uri_line_at_the_size_limit():
+    (reader, writer), (_, client_writer) = await tcp_pair()
+    uri = "x" * MAX_URI_BYTES
+    client_writer.write(uri.encode() + b"\n")
+
+    assert await read_uri_line(reader) == uri
+    writer.close()
+    client_writer.close()
+
+
+async def test_read_uri_line_exceeds_stream_buffer():
+    # The backstop for a line that never fits the stream buffer at all.
     (reader, writer), (_, client_writer) = await tcp_pair()
     client_writer.write(b"x" * (64 * 1024 + 1))
 

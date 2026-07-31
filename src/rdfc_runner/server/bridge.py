@@ -7,7 +7,8 @@ from logging import getLogger
 
 import grpc.aio
 
-HANDSHAKE_TIMEOUT = 10.0
+HANDSHAKE_TIMEOUT = 5.0
+MAX_URI_BYTES = 1024
 PUMP_CHUNK_SIZE = 64 * 1024
 
 logger = getLogger("rdfc_runner.server")
@@ -20,9 +21,9 @@ class HandshakeError(Exception):
 async def read_uri_line(reader: asyncio.StreamReader, timeout: float = HANDSHAKE_TIMEOUT) -> str:
     """Read the '<runner-uri>\\n' handshake line the orchestrator sends first.
 
-    Bounded by the stream's buffer limit and a timeout, and EOF-safe. Any bytes after
-    the newline remain buffered in `reader`, so the subsequent byte pump starts exactly
-    where the handshake ended.
+    Bounded by `MAX_URI_BYTES` (as js-runner is) and a timeout, and EOF-safe. Any bytes
+    after the newline remain buffered in `reader`, so the subsequent byte pump starts
+    exactly where the handshake ended.
     """
     try:
         line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout)
@@ -32,6 +33,9 @@ async def read_uri_line(reader: asyncio.StreamReader, timeout: float = HANDSHAKE
         raise HandshakeError("URI line exceeds the maximum length") from e
     except TimeoutError as e:
         raise HandshakeError("timed out waiting for the URI line") from e
+
+    if len(line) > MAX_URI_BYTES + 1:
+        raise HandshakeError("URI line exceeds the maximum length")
 
     try:
         uri = line.decode("utf-8").strip()
