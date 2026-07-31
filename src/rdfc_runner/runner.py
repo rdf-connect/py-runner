@@ -20,6 +20,19 @@ from .writer import Writer, WriterInstance
 LOG_FLUSH_TIMEOUT = 2.0
 
 
+def _rollback_registrations(current: dict, before: dict) -> None:
+    """Undo the channel registrations made since `before` was snapshotted.
+
+    Only what this call added is dropped: a channel that already existed keeps the instance
+    it had, so a processor that failed to initialize cannot take a working channel with it.
+    """
+    for uri, instance in list(current.items()):
+        if uri not in before:
+            del current[uri]
+        elif before[uri] is not instance:
+            current[uri] = before[uri]
+
+
 class Runner:
     _readers: dict[str, Reader]
     _writers: dict[str, Writer]
@@ -139,6 +152,12 @@ class Runner:
     async def add_processor(self, processor: service_pb2.Processor):
         # Start the processor with the given configuration.
         self.logger.debug(f"Adding processor {processor.uri}")
+        # parse_args registers a reader/writer per channel argument before the processor
+        # itself can be imported or initialized; a failure below must not leave those
+        # registrations behind, or messages on them would be routed to a processor that
+        # does not exist.
+        readers_before = dict(self._readers)
+        writers_before = dict(self._writers)
         try:
             args = AttrDict(parse_args(processor.arguments, self))
 
@@ -153,6 +172,8 @@ class Runner:
             await instance.init()
         except Exception as e:
             self.logger.error(f"Failed to initialize processor {processor.uri}:\n{traceback.format_exc()}")
+            _rollback_registrations(self._readers, readers_before)
+            _rollback_registrations(self._writers, writers_before)
             ### 2.1. Notify the orchestrator that the processor failed to initiate using an RPC.init message.
             await self._write(service_pb2.FromRunner(initialized=service_pb2.ProcessorInitialized(
                 uri=processor.uri,
@@ -295,3 +316,8 @@ class Runner:
         for task in [start_task, *self._processor_transforms]:
             if task is not None and not task.done():
                 task.cancel()
+        # Close the readers as well: a stream message that is still being fanned out waits
+        # for its consumers, which are the very tasks cancelled above. Closing releases that
+        # barrier so no background pump is left waiting on a dead channel.
+        for reader in self._readers.values():
+            reader.close()

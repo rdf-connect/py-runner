@@ -14,12 +14,38 @@ import fake_processor
 def make_runner(captured):
     runner = Runner("urn:test:runner")
     runner.logger = logging.getLogger("test")
+    runner._client = None  # Readers and writers only hold on to the stub.
 
     async def write(msg):
         captured.append(msg)
 
     runner._write = write
     return runner
+
+
+def channel_args(reader_uri: str | None = None, writer_uri: str | None = None) -> str:
+    arguments = {}
+    if reader_uri is not None:
+        arguments["incoming"] = {"@type": "https://w3id.org/rdf-connect#Reader", "@id": reader_uri}
+    if writer_uri is not None:
+        arguments["outgoing"] = {"@type": "https://w3id.org/rdf-connect#Writer", "@id": writer_uri}
+    return json.dumps(arguments)
+
+
+def failing_processor(uri: str = "urn:test:processor", arguments: str = "{}") -> service_pb2.Processor:
+    return service_pb2.Processor(
+        uri=uri,
+        config=json.dumps({"module_path": "nonexistent_module_xyz", "clazz": "Processor"}),
+        arguments=arguments,
+    )
+
+
+def working_processor(uri: str = "urn:test:processor", arguments: str = "{}") -> service_pb2.Processor:
+    return service_pb2.Processor(
+        uri=uri,
+        config=json.dumps({"module_path": "fake_processor", "clazz": "FakeProcessor"}),
+        arguments=arguments,
+    )
 
 
 async def test_add_processor_reports_import_error_to_orchestrator():
@@ -56,6 +82,45 @@ async def test_add_processor_reports_init_failure_to_orchestrator():
 
     assert instance is None
     assert "AttributeError" in captured[0].initialized.error.cause
+
+
+async def test_failed_processor_leaves_no_orphaned_channels():
+    """Channels of a processor that never came up must not stay registered: the orchestrator
+    starts the pipeline anyway, and messages routed to them would hang or vanish."""
+    captured = []
+    runner = make_runner(captured)
+
+    instance = await runner.add_processor(
+        failing_processor(arguments=channel_args("urn:channel:in", "urn:channel:out"))
+    )
+
+    assert instance is None
+    assert runner._readers == {}
+    assert runner._writers == {}
+
+
+async def test_channel_of_a_failed_processor_can_be_recreated():
+    captured = []
+    runner = make_runner(captured)
+
+    await runner.add_processor(failing_processor("urn:test:broken", channel_args("urn:channel:in")))
+    await runner.add_processor(working_processor("urn:test:working", channel_args("urn:channel:in")))
+
+    assert "urn:channel:in" in runner._readers
+    assert not captured[-1].initialized.HasField("error")
+
+
+async def test_failed_processor_keeps_channels_of_earlier_processors():
+    captured = []
+    runner = make_runner(captured)
+
+    await runner.add_processor(working_processor("urn:test:working", channel_args("urn:channel:shared")))
+    established = runner._readers["urn:channel:shared"]
+
+    await runner.add_processor(failing_processor("urn:test:broken", channel_args("urn:channel:shared")))
+
+    # The rollback removes what the failed processor registered, not what was already there.
+    assert runner._readers["urn:channel:shared"] is established
 
 
 class EndingStream:
