@@ -59,12 +59,24 @@ def fanout_stream(
     stream: AsyncGenerator[T, None],
     num_consumers: int,
     on_all_handled: Callable[[], Awaitable[None]] | Callable[[], None],
+    abort: asyncio.Event | None = None,
 ) -> List[AsyncGenerator[T, None]]:
     """Duplicate an async generator stream for multiple consumers, waiting for all to handle each chunk.
 
     Chunks are delivered one at a time: once every (still active) consumer has finished handling
     the current chunk, `on_all_handled` is invoked and only then is the next chunk read from the
     source. Consumers that stop iterating early are excluded from the barrier.
+
+    `on_all_handled` doubles as the sender's flow control (it acks the chunk), so it is called
+    exactly once for every chunk taken from the source — including the chunks nobody consumes.
+    When no consumer is left (none were registered, all of them stopped iterating, or `abort`
+    was set) the remaining source chunks are drained and acked, so a sender that waits for an
+    ack per chunk is never left blocked.
+
+    `abort` releases the barrier from the outside: a consumer generator that is dropped while
+    suspended inside the stream never runs its `finally`, so its slot in the barrier would
+    otherwise stall the source forever. Setting the event makes the pump stop waiting for the
+    consumers and drain the source instead.
     """
 
     _end = object()  # Sentinel signalling the end of the stream.
@@ -72,26 +84,65 @@ def fanout_stream(
     active: set[int] = set(range(num_consumers))
     pending: set[int] = set()
     chunk_handled: asyncio.Event | None = None
+    # Whether `on_all_handled` already ran for the chunk in flight. Guards against a second
+    # call slipping in while the first one is still awaiting (a duplicate ack would confuse
+    # the sender and put two concurrent writes on the same stream).
+    chunk_acked: bool = True
 
-    async def mark_handled(consumer_id: int) -> None:
-        pending.discard(consumer_id)
-        if not pending and chunk_handled is not None and not chunk_handled.is_set():
+    # `on_all_handled` typically writes on a stream that tolerates one writer at a time; an
+    # abort can make the pump ack a chunk whose barrier ack is still in flight, so serialize.
+    ack_lock = asyncio.Lock()
+
+    async def ack_chunk() -> None:
+        async with ack_lock:
             result = on_all_handled()
             if asyncio.iscoroutine(result):
                 await result
-            chunk_handled.set()
+
+    async def mark_handled(consumer_id: int) -> None:
+        nonlocal chunk_acked
+        pending.discard(consumer_id)
+        if pending or chunk_handled is None or chunk_acked:
+            return
+        # Claim the ack before awaiting it, so the decision to fire is atomic within
+        # this event loop turn.
+        chunk_acked = True
+        handled = chunk_handled
+        try:
+            await ack_chunk()
+        finally:
+            handled.set()
+
+    async def wait_for_barrier(handled: asyncio.Event) -> None:
+        if abort is None:
+            await handled.wait()
+            return
+        waiters = [asyncio.ensure_future(handled.wait()), asyncio.ensure_future(abort.wait())]
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
 
     async def pump_source() -> None:
-        nonlocal pending, chunk_handled
+        nonlocal pending, chunk_handled, chunk_acked
         try:
             async for chunk in stream:
-                if not active:
-                    break
+                if not active or (abort is not None and abort.is_set()):
+                    # Nobody is going to handle this chunk; ack it anyway and keep draining
+                    # so the sender's flow control completes.
+                    await ack_chunk()
+                    continue
                 pending = set(active)
                 chunk_handled = asyncio.Event()
+                chunk_acked = False
                 for consumer_id in pending:
                     queues[consumer_id].put_nowait(chunk)
-                await chunk_handled.wait()
+                await wait_for_barrier(chunk_handled)
+                if not chunk_acked:
+                    # Aborted while consumers were still handling this chunk.
+                    chunk_acked = True
+                    await ack_chunk()
         finally:
             for consumer_id in set(active):
                 queues[consumer_id].put_nowait(_end)

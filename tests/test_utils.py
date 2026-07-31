@@ -1,7 +1,6 @@
 import asyncio
+import contextlib
 import json
-
-import pytest
 
 from rdfc_runner.utils import fanout_stream, parse_args
 
@@ -118,3 +117,95 @@ async def test_fanout_stream_single_consumer_empty_stream():
     chunks = [chunk async for chunk in consumers[0]]
 
     assert chunks == []
+
+
+async def _settle(turns: int = 20):
+    """Give the pump and the consumer generators room to run."""
+    for _ in range(turns):
+        await asyncio.sleep(0)
+
+
+async def test_fanout_stream_without_consumers_still_acks_every_chunk():
+    # The ack is the sender's flow control: abandoning the stream after the first chunk
+    # leaves the sender blocked forever, waiting for an ack that never comes.
+    acks = []
+
+    consumers = fanout_stream(_source([1, 2, 3]), 0, lambda: acks.append(1))
+
+    assert consumers == []
+    await _settle()
+    assert len(acks) == 3
+
+
+async def test_fanout_stream_acks_the_rest_after_the_last_consumer_leaves():
+    acks = []
+
+    consumers = fanout_stream(_source([1, 2, 3]), 1, lambda: acks.append(1))
+
+    async def take_one(gen):
+        async for chunk in gen:
+            await gen.aclose()
+            return chunk
+
+    assert await take_one(consumers[0]) == 1
+    await _settle()
+    # One ack for the chunk that was handled, plus one for each drained chunk.
+    assert len(acks) == 3
+
+
+async def test_fanout_stream_abort_releases_the_barrier_and_drains():
+    # A consumer that is dropped while suspended inside the stream never runs its
+    # `finally`, so nothing removes it from the barrier: the abort is the way out.
+    acks = []
+    abort = asyncio.Event()
+
+    consumers = fanout_stream(_source([1, 2, 3]), 1, lambda: acks.append(1), abort=abort)
+
+    abandoned = consumers[0]
+    assert await anext(abandoned) == 1
+    await _settle()
+    assert acks == []  # The pump waits for the consumer that will never come back.
+
+    abort.set()
+    await _settle()
+
+    assert len(acks) == 3
+
+
+async def test_fanout_stream_acks_a_chunk_once_while_the_ack_is_in_flight():
+    acks = []
+    release = asyncio.Event()
+
+    async def on_all_handled():
+        acks.append(1)
+        await release.wait()
+
+    first, second = fanout_stream(_source([1, 2]), 2, on_all_handled)
+
+    collected = []
+
+    async def drive(gen):
+        async for chunk in gen:
+            collected.append(chunk)
+
+    driver = asyncio.create_task(drive(first))
+    assert await anext(second) == 1
+    await _settle()
+    assert collected == [1]  # The first consumer handled the chunk and marked it.
+
+    # The second consumer leaves: the barrier is complete, the ack write is in flight.
+    closing = asyncio.create_task(second.aclose())
+    await _settle()
+    assert len(acks) == 1
+
+    # The first consumer's generator is finalized while that ack is still in flight; its
+    # `finally` must not fire a second ack for the same chunk.
+    driver.cancel()
+    await _settle()
+    assert len(acks) == 1
+
+    release.set()
+    await asyncio.wait_for(closing, timeout=1)
+    with contextlib.suppress(asyncio.CancelledError):
+        await driver
+    await _settle()
