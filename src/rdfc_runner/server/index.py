@@ -51,22 +51,24 @@ def extract_processor_descriptions(processor_paths: Iterable[str]) -> list[Proce
     return descriptions
 
 
-def generate_index_graph(processor_paths: Iterable[str], cwd: str, grpc_port: int, base: str) -> Graph:
+def generate_index_graph(processor_paths: Iterable[str], cwd: str, hostname: str, grpc_port: int,
+                         base: str) -> Graph:
     """Build the index document served at the HTTP root.
 
-    It declares the rdfc:HttpRunner (with the gRPC port the orchestrator must connect to),
-    the SHACL shape for Python processor declarations, and a description of every processor
-    the server hosts. All IRIs are absolute against `base` (the URL the server is reached
-    on, with trailing slash), so the document is correct however the server is addressed.
+    It declares the rdfc:TcpRunner (with the `host:port` address the orchestrator must
+    connect to), the SHACL shape for Python processor declarations, and a description of
+    every processor the server hosts. All IRIs are absolute against `base` (the URL the
+    server is reached on, with trailing slash), so the document is correct however the
+    server is addressed.
     """
     graph = Graph()
     prelude = files("rdfc_runner.server").joinpath("index_prelude.ttl").read_text()
     graph.parse(data=prelude, format="turtle", publicID=base)
 
     runner = URIRef(base + "pyRunner")
-    graph.add((runner, RDF.type, RDFC.HttpRunner))
+    graph.add((runner, RDF.type, RDFC.TcpRunner))
     graph.add((runner, RDFC.handlesSubjectsOf, RDFC.pyImplementationOf))
-    graph.add((runner, RDFC.grpcPort, Literal(grpc_port)))
+    graph.add((runner, RDFC.grpc, Literal(f"{hostname}:{grpc_port}")))
 
     for description in extract_processor_descriptions(processor_paths):
         subject = URIRef(description.uri)
@@ -81,5 +83,6 @@ def generate_index_graph(processor_paths: Iterable[str], cwd: str, grpc_port: in
     return graph
 
 
-def generate_index_ttl(processor_paths: Iterable[str], cwd: str, grpc_port: int, base: str) -> str:
-    return generate_index_graph(processor_paths, cwd, grpc_port, base).serialize(format="turtle")
+def generate_index_ttl(processor_paths: Iterable[str], cwd: str, hostname: str, grpc_port: int,
+                       base: str) -> str:
+    return generate_index_graph(processor_paths, cwd, hostname, grpc_port, base).serialize(format="turtle")

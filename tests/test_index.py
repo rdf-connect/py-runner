@@ -1,6 +1,6 @@
 from importlib.resources import files
 
-from rdflib import Graph, Literal, Namespace, RDF, RDFS, URIRef, XSD
+from rdflib import Graph, Literal, Namespace, RDF, RDFS, URIRef
 from rdflib.namespace import SH
 
 from rdfc_runner.server.index import extract_processor_descriptions, generate_index_ttl
@@ -37,16 +37,16 @@ def test_generate_index_ttl(tmp_path):
     path.write_text(PROCESSORS_TTL)
     base = "http://runner.example:1234/"
 
-    ttl = generate_index_ttl([str(path)], str(tmp_path), 50055, base)
+    ttl = generate_index_ttl([str(path)], str(tmp_path), "runner.example", 50055, base)
 
     graph = Graph()
     graph.parse(data=ttl, format="turtle")
 
     runner = URIRef(base + "pyRunner")
-    assert (runner, RDF.type, RDFC.HttpRunner) in graph
+    assert (runner, RDF.type, RDFC.TcpRunner) in graph
     assert (runner, RDFC.handlesSubjectsOf, RDFC.pyImplementationOf) in graph
-    assert graph.value(runner, RDFC.grpcPort) == Literal(50055)
-    assert graph.value(runner, RDFC.grpcPort).datatype == XSD.integer
+    assert graph.value(runner, RDFC.grpc) == Literal("runner.example:50055")
+    assert graph.value(runner, RDFC.grpc).datatype is None
 
     processor = RDFC.TestProcessor
     assert (processor, RDF.type, RDFC.Processor) in graph

@@ -29,6 +29,7 @@ async def server(tmp_path):
         grpc_port=50999,
         processor_paths=[str(tmp_path / "processors.ttl")],
         config_path=str(tmp_path / "server.ttl"),
+        hostname="runner.example",
     )
     return RunnerServer(config, cwd=str(tmp_path))
 
@@ -80,8 +81,8 @@ async def test_index_uses_request_host(client):
     graph.parse(data=ttl, format="turtle")
     base = f"http://{client.host}:{client.port}/"
     runner = URIRef(base + "pyRunner")
-    assert (runner, RDF.type, RDFC.HttpRunner) in graph
-    assert graph.value(runner, RDFC.grpcPort) == Literal(50999)
+    assert (runner, RDF.type, RDFC.TcpRunner) in graph
+    assert graph.value(runner, RDFC.grpc) == Literal("runner.example:50999")
     # The processor's definition file is referenced relative to the served base.
     processor = RDFC.TestProcessor
     assert graph.value(processor, RDF.type) == RDFC.Processor

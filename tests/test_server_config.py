@@ -21,6 +21,8 @@ def test_parse_server_config_defaults(tmp_path):
 
     assert config.http_port == 3000
     assert config.grpc_port == 50051
+    assert config.hostname == "localhost"
+    assert config.history_size == 5
     assert config.processor_paths == []
 
 
@@ -31,6 +33,8 @@ def test_parse_server_config_explicit(tmp_path):
         <> a rdfc:PyRunnerServer;
           rdfc:httpPort 8080;
           rdfc:grpcPort 60051;
+          rdfc:hostname "example.com";
+          rdfc:historySize 10;
           rdfc:processorConfig <./processors.ttl>.
     """)
 
@@ -38,8 +42,22 @@ def test_parse_server_config_explicit(tmp_path):
 
     assert config.http_port == 8080
     assert config.grpc_port == 60051
+    assert config.hostname == "example.com"
+    assert config.history_size == 10
     # The relative IRI resolves against the config document.
     assert config.processor_paths == [os.path.realpath(str(tmp_path / "processors.ttl"))]
+
+
+def test_parse_server_config_unlimited_history(tmp_path):
+    config_path = write(tmp_path, "server.ttl", """
+        @prefix rdfc: <https://w3id.org/rdf-connect#>.
+        <> a rdfc:PyRunnerServer;
+          rdfc:historySize -1.
+    """)
+
+    config = parse_server_config(config_path)
+
+    assert config.history_size == -1
 
 
 def test_parse_server_config_multiple_processor_configs(tmp_path):

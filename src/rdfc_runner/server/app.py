@@ -40,7 +40,8 @@ class RunnerServer:
         self._index_for = lru_cache(maxsize=32)(self._generate_index)
 
     def _generate_index(self, base: str) -> str:
-        return generate_index_ttl(self.config.processor_paths, self.cwd, self.config.grpc_port, base)
+        return generate_index_ttl(self.config.processor_paths, self.cwd, self.config.hostname,
+                                  self.config.grpc_port, base)
 
     ### HTTP ###
 
