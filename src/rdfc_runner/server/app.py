@@ -33,7 +33,7 @@ class RunnerServer:
         self.config = config
         self.cwd = cwd or os.getcwd()
         self.whitelist = build_whitelist(config.processor_paths)
-        self.state = State()
+        self.state = State(history_size=config.history_size)
         self._connections: set[asyncio.Task] = set()
         self._stopping = False
         # The index depends only on the requested base URL; cache a bounded number of variants.
