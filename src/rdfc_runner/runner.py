@@ -3,7 +3,7 @@ import importlib
 import json
 import traceback
 from logging import getLogger, Logger
-from typing import List, Awaitable, Any, Dict
+from typing import List, Any, Dict
 
 import grpc.aio
 from rdfc_proto import service_pb2_grpc, service_pb2, common_pb2
@@ -14,6 +14,10 @@ from .reader import Reader, ReaderInstance
 from .types import Writable, AttrDict
 from .utils import parse_args, spawn_logged
 from .writer import Writer, WriterInstance
+
+# Grace period for the log stream to deliver its trailing messages before the caller
+# closes the channel underneath the RPC.
+LOG_FLUSH_TIMEOUT = 2.0
 
 
 class Runner:
@@ -26,7 +30,7 @@ class Runner:
     uri: str
 
     _processors: List[Processor]
-    _processor_transforms: List[Awaitable[Any]]
+    _processor_transforms: List[asyncio.Task]
 
     def __init__(self, runner_iri: str, state=None, runner_id: str | None = None):
         self.uri = runner_iri
@@ -36,6 +40,7 @@ class Runner:
         self._processors = []
         self._processor_transforms = []
         self._grpc_logger = None
+        self._log_stream_task = None
         # Optional server-mode statistics (rdfc_runner.server.state.State).
         self._state = state
         self._runner_id = runner_id
@@ -63,7 +68,7 @@ class Runner:
         # Initiate the RPC.logStream log stream to the orchestrator by creating a logger iterator.
         self._grpc_logger = GrpcLogger(stub, self.uri)
         self.logger = getLogger('rdfc')
-        spawn_logged(self._grpc_logger.run(), getLogger(__name__), "gRPC log stream")
+        self._log_stream_task = spawn_logged(self._grpc_logger.run(), getLogger(__name__), "gRPC log stream")
 
     def _track_channel(self, uri: str, role: str):
         if self._state is not None and self._runner_id is not None:
@@ -200,6 +205,13 @@ class Runner:
             # runner is cancelled before or during the connect handshake.
             if self._grpc_logger is not None:
                 self._grpc_logger.close()
+            # Wait for the log stream RPC to finish before returning: the caller closes the
+            # channel right after us, which would cancel the in-flight RPC and drop the
+            # trailing log messages. `wait` never re-raises the task's own outcome.
+            if self._log_stream_task is not None:
+                done, _ = await asyncio.wait([self._log_stream_task], timeout=LOG_FLUSH_TIMEOUT)
+                if not done:
+                    getLogger(__name__).debug("Timed out flushing the log stream to the orchestrator")
 
     async def _run_with_stub(self, stub: service_pb2_grpc.RunnerStub):
         ### 1. Connect to the orchestrator and identify the runner to the orchestrator. (6.2.1.2 / 6.3.2)
@@ -207,6 +219,7 @@ class Runner:
 
         # Await all processors to finish
         processors_ended = asyncio.Future()
+        start_task: asyncio.Task | None = None
 
         def on_start_done(task: asyncio.Task) -> None:
             # Resolve `processors_ended` with the outcome of `start()`, propagating failures.
@@ -220,6 +233,7 @@ class Runner:
                 processors_ended.set_result(True)
 
         async def listen_to_normal_stream():
+            nonlocal start_task
             try:
                 async for msg in normal_stream:
                     ### 1.3. The orchestrator responds to the RPC.identify message with a RPC.pipeline message,
@@ -236,7 +250,8 @@ class Runner:
                     elif msg.HasField('start'):
                         # Execute the start function of each processor instantiation.
                         # Wait (in the background) until all processors are done executing, and then resolve the task.
-                        asyncio.create_task(self.start()).add_done_callback(on_start_done)
+                        start_task = asyncio.create_task(self.start())
+                        start_task.add_done_callback(on_start_done)
 
                     ### 4. Handle incoming messages by the orchestrator. (6.2.2 / 6.3.4)
                     else:
@@ -256,13 +271,27 @@ class Runner:
         # Run listener concurrently in the background
         listener_task = spawn_logged(listen_to_normal_stream(), self.logger, "orchestrator stream listener")
 
+        completed = False
         try:
             ### 5. Wait till all processors complete their execution.
             await processors_ended
             self.logger.debug("Processors ended")
+            completed = True
 
             ### 6. Close the normal stream to signal completion.
             await normal_stream.done_writing()
         finally:
             if not listener_task.done():
                 listener_task.cancel()
+            if not completed:
+                # The pipeline is being torn down abnormally (the orchestrator went away or
+                # something failed). Whatever is still running can never make progress on a
+                # dead channel, so cancel it instead of leaking it for the process' lifetime.
+                # On a clean completion these tasks are already done.
+                self._cancel_pipeline_tasks(start_task)
+
+    def _cancel_pipeline_tasks(self, start_task: asyncio.Task | None) -> None:
+        """Cancel the tasks driving the pipeline: `start()` and the processor transforms."""
+        for task in [start_task, *self._processor_transforms]:
+            if task is not None and not task.done():
+                task.cancel()
