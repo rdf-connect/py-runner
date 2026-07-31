@@ -10,6 +10,8 @@ RDFC = Namespace("https://w3id.org/rdf-connect#")
 
 DEFAULT_HTTP_PORT = 3000
 DEFAULT_GRPC_PORT = 50051
+DEFAULT_HOSTNAME = "localhost"
+DEFAULT_HISTORY_SIZE = 5
 
 
 class ConfigError(Exception):
@@ -22,6 +24,8 @@ class ServerConfig:
     grpc_port: int
     processor_paths: list[str]
     config_path: str
+    hostname: str = DEFAULT_HOSTNAME
+    history_size: int = DEFAULT_HISTORY_SIZE
 
 
 def iri_to_path(value) -> str:
@@ -54,6 +58,8 @@ def parse_server_config(path: str) -> ServerConfig:
 
     http_port = graph.value(subject, RDFC.httpPort)
     grpc_port = graph.value(subject, RDFC.grpcPort)
+    hostname = graph.value(subject, RDFC.hostname)
+    history_size = graph.value(subject, RDFC.historySize)
     processor_paths = sorted(iri_to_path(o) for o in graph.objects(subject, RDFC.processorConfig))
 
     return ServerConfig(
@@ -61,4 +67,6 @@ def parse_server_config(path: str) -> ServerConfig:
         grpc_port=int(grpc_port) if grpc_port is not None else DEFAULT_GRPC_PORT,
         processor_paths=processor_paths,
         config_path=config_path,
+        hostname=str(hostname) if hostname is not None else DEFAULT_HOSTNAME,
+        history_size=int(history_size) if history_size is not None else DEFAULT_HISTORY_SIZE,
     )
