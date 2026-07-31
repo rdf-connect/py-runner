@@ -46,7 +46,7 @@ class RunnerServer:
     ### HTTP ###
 
     def make_app(self) -> web.Application:
-        app = web.Application(client_max_size=MAX_REQUEST_SIZE)
+        app = web.Application(client_max_size=MAX_REQUEST_SIZE, middlewares=[self._log_request])
         app.add_routes([
             web.get("/health", self._handle_health),
             web.get("/api/state", self._handle_state),
@@ -55,6 +55,17 @@ class RunnerServer:
             web.get("/{tail:.+}", self._handle_file),
         ])
         return app
+
+    @web.middleware
+    async def _log_request(self, request: web.Request, handler) -> web.StreamResponse:
+        """Logs one line per served request; visible with LOG_LEVEL=debug."""
+        try:
+            response = await handler(request)
+        except web.HTTPException as e:
+            logger.debug(f"{request.method} {request.path} -> {e.status}")
+            raise
+        logger.debug(f"{request.method} {request.path} -> {response.status}")
+        return response
 
     async def _handle_health(self, _request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "activeConnections": len(self._connections)})

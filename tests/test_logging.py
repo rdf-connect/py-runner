@@ -1,7 +1,10 @@
 import asyncio
 import logging
 
+import pytest
+
 from rdfc_runner.logger import Logger as GrpcLogger, _ContextRoutingHandler
+from rdfc_runner.server.__main__ import resolve_log_level
 
 
 class FakeStub:
@@ -52,3 +55,18 @@ async def test_close_terminates_log_stream():
     grpc_logger.close()
 
     await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("debug", logging.DEBUG),
+    ("info", logging.INFO),
+    ("warn", logging.WARNING),
+    ("warning", logging.WARNING),
+    ("error", logging.ERROR),
+    ("DEBUG", logging.DEBUG),
+    (" Warn ", logging.WARNING),
+    ("verbose", logging.INFO),
+    ("", logging.INFO),
+])
+def test_resolve_log_level(value, expected):
+    assert resolve_log_level(value) == expected

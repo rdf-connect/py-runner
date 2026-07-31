@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from rdflib import Graph, Literal, Namespace, RDF, URIRef
@@ -131,3 +133,12 @@ async def test_post_not_allowed(client):
     response = await client.post("/health")
 
     assert response.status == 405
+
+
+async def test_requests_logged_at_debug_level(client, caplog):
+    with caplog.at_level(logging.DEBUG, logger="rdfc_runner.server"):
+        await client.get("/health")
+        await client.get("/secret.ttl")
+
+    assert "GET /health -> 200" in caplog.text
+    assert "GET /secret.ttl -> 403" in caplog.text
