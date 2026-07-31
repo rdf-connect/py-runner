@@ -43,8 +43,14 @@ Create a Turtle configuration for the server:
 <> a rdfc:PyRunnerServer;
   rdfc:httpPort 3000;                       # HTTP: index, processor configs, /health, /api/state, /dashboard
   rdfc:grpcPort 50051;                      # TCP: orchestrator-initiated runner connections
+  rdfc:hostname "localhost";                # the host the orchestrator must dial to reach rdfc:grpcPort
+  rdfc:historySize 5;                       # finished runs kept on the dashboard (-1 keeps all, 0 keeps none)
   rdfc:processorConfig <./processors.ttl>.  # one or more processor configuration files to serve
 ```
+
+`rdfc:hostname` defaults to `localhost` and is advertised verbatim; an IPv6 address must
+therefore be written with brackets (`rdfc:hostname "[::1]"`), as the orchestrator's address
+parser expects them.
 
 And start the server (the processor modules referenced by `rdfc:modulePath` must be importable,
 e.g. installed in the environment or on `PYTHONPATH`):
@@ -53,8 +59,12 @@ e.g. installed in the environment or on `PYTHONPATH`):
 PYTHONPATH=processors rdfc-runner-server server.ttl
 ```
 
+The server's own log verbosity is set with the `LOG_LEVEL` environment variable
+(`debug`, `info`, `warn` or `error`; default `info`). At `debug` every served HTTP request is
+logged as well. This is independent of the pipeline logs, which are forwarded to the orchestrator.
+
 A pipeline uses the remote runner by importing the runner definition and processor
-configurations from the server, and instantiating the served `rdfc:HttpRunner`:
+configurations from the server, and instantiating the served `rdfc:TcpRunner`:
 
 ```turtle
 @prefix owl: <http://www.w3.org/2002/07/owl#>.
@@ -70,16 +80,22 @@ configurations from the server, and instantiating the served `rdfc:HttpRunner`:
   ].
 ```
 
-The orchestrator derives the runner's host from the runner IRI (`runner:pyRunner` →
-`localhost`), opens a plain TCP connection to `host:grpcPort`, and sends the runner IRI.
-The server then instantiates a runner that communicates over that same connection using
-the regular gRPC protocol — the runner never dials the orchestrator, so only the runner's
-ports need to be reachable. **The hostname in the runner IRI (i.e. in the `runner:` prefix
-of the pipeline) must therefore be reachable from the orchestrator.**
+The index the server generates describes that runner as `a rdfc:TcpRunner` with
+`rdfc:grpc "<hostname>:<grpcPort>"` — the address built from the `rdfc:hostname` and
+`rdfc:grpcPort` of the server configuration. The orchestrator dials exactly that address,
+writes the runner IRI followed by a newline, and then reverse-upgrades the socket: it treats
+its own end as an incoming gRPC connection. The server instantiates a runner that speaks the
+regular gRPC protocol over that same connection — the runner never dials the orchestrator, so
+only the runner's ports need to be reachable. **The hostname in the runner IRI (i.e. in the
+`runner:` prefix of the pipeline) plays no role in connectivity; it only says where the
+configuration was imported from. It is `rdfc:hostname` that must be reachable from the
+orchestrator.**
 
 The server exposes some introspection endpoints next to the served configuration files:
 `/health` (status + active connection count), `/api/state` (per-runner status and channel
-statistics as JSON), and `/dashboard` (a live HTML view of the same).
+statistics as JSON), and `/dashboard` (a live HTML view of the same). Next to the runners that
+are currently connected, these keep the last `rdfc:historySize` finished runs (default 5;
+`-1` keeps all of them, `0` none), so a pipeline run remains visible after it completed.
 
 See [`examples/echo`](examples/echo) for a complete example.
 
@@ -108,10 +124,10 @@ RUN pip install my-processor-package
 COPY server.ttl processors.ttl /config/
 ```
 
-Remember that the runner IRI's hostname must resolve from the orchestrator: use
-`@prefix runner: <http://localhost:3000/>.` when the orchestrator runs on the Docker host
-with published ports, or the compose service name (e.g. `http://py-runner:3000/`) when the
-orchestrator runs in the same compose network.
+Remember to set `rdfc:hostname` in `server.ttl` to a name the orchestrator can resolve: the
+compose service name (e.g. `"py-runner"`) when the orchestrator runs in the same compose
+network, or the published host (e.g. `"localhost"`) when it runs on the Docker host with
+published ports.
 
 ## Testing
 
