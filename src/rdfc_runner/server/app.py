@@ -31,7 +31,11 @@ class RunnerServer:
 
     def __init__(self, config: ServerConfig, cwd: str | None = None):
         self.config = config
-        self.cwd = cwd or os.getcwd()
+        # The HTTP root maps onto the directory holding the server config, not onto the
+        # process' working directory: the orchestrator resolves the served file IRIs against
+        # that document, and a root elsewhere would advertise '..'-containing IRIs that this
+        # server then refuses to serve. `cwd` stays overridable for tests.
+        self.cwd = cwd if cwd is not None else os.path.dirname(os.path.realpath(config.config_path))
         self.whitelist = build_whitelist(config.processor_paths)
         self.state = State(history_size=config.history_size)
         self._connections: set[asyncio.Task] = set()

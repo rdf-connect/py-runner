@@ -36,6 +36,18 @@ def iri_to_path(value) -> str:
     return os.path.realpath(text)
 
 
+def _as_int(value, prop: str, default: int, config_path: str) -> int:
+    """Convert a configured literal to an int, reporting bad values as a ConfigError."""
+    if value is None:
+        return default
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"Invalid rdfc:{prop} in {config_path}: expected an integer, got '{value}'"
+        ) from None
+
+
 def parse_server_config(path: str) -> ServerConfig:
     """Parse an rdfc:PyRunnerServer Turtle configuration file.
 
@@ -63,10 +75,10 @@ def parse_server_config(path: str) -> ServerConfig:
     processor_paths = sorted(iri_to_path(o) for o in graph.objects(subject, RDFC.processorConfig))
 
     return ServerConfig(
-        http_port=int(http_port) if http_port is not None else DEFAULT_HTTP_PORT,
-        grpc_port=int(grpc_port) if grpc_port is not None else DEFAULT_GRPC_PORT,
+        http_port=_as_int(http_port, "httpPort", DEFAULT_HTTP_PORT, config_path),
+        grpc_port=_as_int(grpc_port, "grpcPort", DEFAULT_GRPC_PORT, config_path),
         processor_paths=processor_paths,
         config_path=config_path,
         hostname=str(hostname) if hostname is not None else DEFAULT_HOSTNAME,
-        history_size=int(history_size) if history_size is not None else DEFAULT_HISTORY_SIZE,
+        history_size=_as_int(history_size, "historySize", DEFAULT_HISTORY_SIZE, config_path),
     )
