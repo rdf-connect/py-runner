@@ -35,6 +35,14 @@ the runner can be hosted as a long-running server — on another machine, or in 
 The server serves the runner definition and its processor configurations over HTTP,
 and instantiates a runner for every incoming orchestrator connection.
 
+> [!WARNING]
+> **The gRPC port is unauthenticated and executes what a connecting orchestrator asks for.**
+> Anything that can connect to `rdfc:grpcPort` can have the server import and run arbitrary
+> Python modules from its environment, and the HTTP port publicly serves the configured
+> processor files. The server has the same posture as js-runner's: it is meant for networks
+> where every host is trusted. Bind or firewall both ports accordingly — a private Docker
+> network, a VPN, or a loopback-only deployment — and never expose them to the public internet.
+
 Create a Turtle configuration for the server:
 
 ```turtle
@@ -123,6 +131,9 @@ FROM rdfc/py-runner
 RUN pip install my-processor-package
 COPY server.ttl processors.ttl /config/
 ```
+
+Both published ports are unauthenticated (see the warning above): prefer letting the orchestrator
+reach the server over a private compose network instead of publishing the ports on the host.
 
 Remember to set `rdfc:hostname` in `server.ttl` to a name the orchestrator can resolve: the
 compose service name (e.g. `"py-runner"`) when the orchestrator runs in the same compose
