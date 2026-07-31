@@ -95,9 +95,13 @@ async def test_server_runs_two_sequential_pipelines():
         for instance in fake_processor.INSTANCES:
             assert instance.events == ["init", "transform", "produce"]
 
-        # All connections cleaned up.
+        # All connections cleaned up, both runs archived in the history newest first.
         assert len(server._connections) == 0
-        assert server.state.snapshot() == []
+        snapshot = server.state.snapshot()
+        assert [(r["uri"], r["status"]) for r in snapshot] == [
+            ("urn:runner:two", "done"), ("urn:runner:one", "done")
+        ]
+        assert all(r["disconnectedAt"] is not None for r in snapshot)
     finally:
         await server.shutdown(tcp_server)
 

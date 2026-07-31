@@ -9,6 +9,7 @@
     h1 { color: #7ec8e3; margin-bottom: 1rem; font-size: 1.4rem; }
     #updated { font-size: 0.75rem; color: #555; margin-bottom: 1.5rem; }
     .runner { border: 1px solid #333; border-radius: 6px; padding: 1rem; margin-bottom: 1.25rem; }
+    .runner-disconnected { opacity: 0.6; border-style: dashed; }
     .runner-meta { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-bottom: 0.75rem; font-size: 0.85rem; }
     .runner-meta span { color: #888; }
     .runner-meta strong { color: #aaa; }
@@ -129,13 +130,15 @@
         return
       }
       el.innerHTML = runners.map(r => `
-        <div class="runner">
+        <div class="runner${r.disconnectedAt ? ' runner-disconnected' : ''}">
           <div class="runner-meta">
             <span><strong>URI:</strong> ${esc(r.uri)}</span>
             <span><strong>Host:</strong> ${esc(r.host)}</span>
             <span><strong>Status:</strong> <span class="status s-${esc(r.status)}">${esc(r.status)}</span></span>
             <span><strong>gRPC:</strong> <span class="g-${esc(r.grpcState)}">${esc(r.grpcState)}</span></span>
-            <span><strong>Uptime:</strong> ${fmtDuration(r.connectedAt)}</span>
+            ${r.disconnectedAt
+              ? `<span><strong>Disconnected:</strong> ${fmtAge(r.disconnectedAt)}</span>`
+              : `<span><strong>Uptime:</strong> ${fmtDuration(r.connectedAt)}</span>`}
           </div>
           ${renderChannels(r.id, r.channels)}
         </div>

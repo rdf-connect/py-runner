@@ -2,6 +2,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+from .config import DEFAULT_HISTORY_SIZE
+
 RunnerStatus = Literal["connecting", "running", "done", "error"]
 ChannelRole = Literal["reader", "writer"]
 
@@ -34,6 +36,7 @@ class RunnerStats:
     host: str
     uri: str
     connected_at: int
+    disconnected_at: Optional[int] = None
     status: RunnerStatus = "connecting"
     grpc_state: str = "IDLE"
     channels: dict[str, ChannelStats] = field(default_factory=dict)
@@ -44,6 +47,7 @@ class RunnerStats:
             "host": self.host,
             "uri": self.uri,
             "connectedAt": self.connected_at,
+            "disconnectedAt": self.disconnected_at,
             "status": self.status,
             "grpcState": self.grpc_state,
             "channels": {uri: channel.to_json() for uri, channel in self.channels.items()},
@@ -76,8 +80,12 @@ def _now_ms() -> int:
 class State:
     """Tracks the runners served by this process, for the dashboard and /api/state."""
 
-    def __init__(self):
+    def __init__(self, history_size: int = DEFAULT_HISTORY_SIZE):
         self._runners: dict[str, RunnerStats] = {}
+        # Most recently disconnected runners, newest first, so the dashboard keeps
+        # showing a pipeline run after it finished. -1 means "keep them all".
+        self._history: list[RunnerStats] = []
+        self._history_size = max(-1, history_size)
         self._next_id = 1
 
     def register_runner(self, host: str, uri: str) -> str:
@@ -87,7 +95,15 @@ class State:
         return runner_id
 
     def deregister_runner(self, runner_id: str) -> None:
-        self._runners.pop(runner_id, None)
+        runner = self._runners.pop(runner_id, None)
+        if runner is None:
+            return
+        runner.disconnected_at = _now_ms()
+        if runner.status != "error":
+            runner.status = "done"
+        self._history.insert(0, runner)
+        if self._history_size >= 0:
+            del self._history[self._history_size:]
 
     def set_status(self, runner_id: str, status: RunnerStatus) -> None:
         runner = self._runners.get(runner_id)
@@ -111,4 +127,4 @@ class State:
         return ChannelTracker(runner.channels[uri])
 
     def snapshot(self) -> list[dict]:
-        return [runner.to_json() for runner in self._runners.values()]
+        return [runner.to_json() for runner in (*self._runners.values(), *self._history)]
