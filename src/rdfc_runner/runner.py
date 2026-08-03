@@ -20,19 +20,6 @@ from .writer import Writer, WriterInstance
 LOG_FLUSH_TIMEOUT = 2.0
 
 
-def _rollback_registrations(current: dict, before: dict) -> None:
-    """Undo the channel registrations made since `before` was snapshotted.
-
-    Only what this call added is dropped: a channel that already existed keeps the instance
-    it had, so a processor that failed to initialize cannot take a working channel with it.
-    """
-    for uri, instance in list(current.items()):
-        if uri not in before:
-            del current[uri]
-        elif before[uri] is not instance:
-            current[uri] = before[uri]
-
-
 class Runner:
     _readers: dict[str, Reader]
     _writers: dict[str, Writer]
@@ -88,6 +75,33 @@ class Runner:
             return self._state.track_channel(self._runner_id, uri, role)
         return None
 
+    def _untrack_channel(self, uri: str, role: str) -> None:
+        if self._state is not None and self._runner_id is not None:
+            self._state.untrack_channel(self._runner_id, uri, role)
+
+    def _rollback_registrations(self, current: dict, before: dict, role: str) -> None:
+        """Undo the channel registrations made since `before` was snapshotted.
+
+        Only what this call added is dropped: a channel that already existed keeps the
+        instance it had, so a processor that failed to initialize cannot take a working
+        channel with it. The side effects of a registration are rolled back along with it:
+        the stats entry a fresh registration created, and the discarded reader is closed
+        so a message racing in on it is acked instead of pushed to a processor that never
+        came up.
+        """
+        for uri, instance in list(current.items()):
+            if uri in before and before[uri] is instance:
+                continue
+            if uri not in before:
+                del current[uri]
+                # A re-registration reused the stats entry of the instance it displaced,
+                # which the restored instance still feeds; only a fresh one is dropped.
+                self._untrack_channel(uri, role)
+            else:
+                current[uri] = before[uri]
+            if role == "reader":
+                instance.close()
+
     def create_reader(self, uri: str) -> Reader:
         reader = ReaderInstance(uri, self._client, self._write, self.logger,
                                 tracker=self._track_channel(uri, "reader"))
@@ -134,7 +148,9 @@ class Runner:
                 self.logger.error(f"No reader found for channel {message.close.channel} to handle close.")
             writer = self._writers.get(message.close.channel)
             if writer:
-                await writer.close(True)
+                # Not awaited inline: with an open stream the close resolves only after a
+                # 'processed' ack that this same, strictly sequential listener dispatches.
+                spawn_logged(writer.close(True), self.logger, f"close of writer {message.close.channel}")
             else:
                 self.logger.error(f"No writer found for channel {message.close.channel} to handle close.")
         elif message.HasField('processed'):
@@ -172,8 +188,8 @@ class Runner:
             await instance.init()
         except Exception as e:
             self.logger.error(f"Failed to initialize processor {processor.uri}:\n{traceback.format_exc()}")
-            _rollback_registrations(self._readers, readers_before)
-            _rollback_registrations(self._writers, writers_before)
+            self._rollback_registrations(self._readers, readers_before, "reader")
+            self._rollback_registrations(self._writers, writers_before, "writer")
             ### 2.1. Notify the orchestrator that the processor failed to initiate using an RPC.init message.
             await self._write(service_pb2.FromRunner(initialized=service_pb2.ProcessorInitialized(
                 uri=processor.uri,

@@ -144,6 +144,57 @@ async def test_close_releases_a_stream_whose_consumer_walked_away():
     assert events == [("open", 7), ("ack", 0), ("ack", 1), ("ack", 2), ("processed", 7)]
 
 
+async def test_close_does_not_truncate_a_stream_being_consumed():
+    """A close must not cut off a processor that is actively iterating a substream: the
+    release of the fan-out barrier is for consumers that are gone, not live ones. A
+    truncated stream would end cleanly with the tail silently missing."""
+    reader, events = make_reader([b"one", b"two", b"three"])
+    consumer = reader.streams()
+    received = []
+    resume = asyncio.Event()
+
+    async def consume():
+        async for substream in consumer:
+            async for chunk in substream:
+                received.append(chunk)
+                if len(received) == 1:
+                    await resume.wait()  # hold mid-stream while the channel closes
+
+    task = asyncio.create_task(consume())
+    await reader.handle_streaming_msg(stream_msg())
+    await wait_for(lambda: len(received) == 1)
+
+    reader.close()
+    resume.set()
+
+    await wait_for(lambda: ("processed", 7) in events)
+    await asyncio.wait_for(task, timeout=2)
+    assert received == [b"one", b"two", b"three"]
+
+
+async def test_close_racing_an_in_flight_message_still_acks_it():
+    """A close landing between handle_msg and the scheduled push must not drop the ack:
+    the sending pipeline awaits it and would hang forever."""
+    reader, events = make_reader([])
+    reader.strings()  # registered, never iterated
+
+    reader.handle_msg(common_pb2.ReceivingMessage(channel=CHANNEL, globalSequenceNumber=3, data=b"x"))
+    reader.close()  # lands before the push task ran
+
+    await wait_for(lambda: ("processed", 3) in events)
+
+
+async def test_close_with_a_delivered_but_unconsumed_message_still_acks_it():
+    reader, events = make_reader([])
+    reader.strings()  # registered, never iterated
+
+    reader.handle_msg(common_pb2.ReceivingMessage(channel=CHANNEL, globalSequenceNumber=3, data=b"x"))
+    await settle()  # the push is delivered, but nobody consumes it
+
+    reader.close()
+    await wait_for(lambda: ("processed", 3) in events)
+
+
 async def test_message_on_a_closed_reader_is_still_acked():
     reader, events = make_reader([])
     reader.close()
@@ -151,5 +202,14 @@ async def test_message_on_a_closed_reader_is_still_acked():
     reader.handle_msg(common_pb2.ReceivingMessage(channel=CHANNEL, globalSequenceNumber=3, data=b"x"))
     await wait_for(lambda: ("processed", 3) in events)
 
+
+async def test_streaming_message_on_a_closed_reader_is_drained_and_acked():
+    """Even without consumers left, the sender's flow control needs the per-chunk acks:
+    a bare global ack would leave the sending pipeline blocked mid-stream."""
+    reader, events = make_reader([b"one", b"two"])
+    reader.close()
+
     await reader.handle_streaming_msg(stream_msg(4))
-    assert events == [("processed", 3), ("processed", 4)]
+    await wait_for(lambda: ("processed", 4) in events)
+
+    assert events == [("open", 4), ("ack", 0), ("ack", 1), ("processed", 4)]

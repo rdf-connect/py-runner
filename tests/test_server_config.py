@@ -48,6 +48,24 @@ def test_parse_server_config_explicit(tmp_path):
     assert config.processor_paths == [os.path.realpath(str(tmp_path / "processors.ttl"))]
 
 
+def test_parse_server_config_literal_path_resolves_against_config_dir(tmp_path, monkeypatch):
+    """A plain literal path is not resolved by rdflib against the document, so it must not
+    silently fall back to whatever directory the server process happens to run from."""
+    write(tmp_path, "processors.ttl", "")
+    config_path = write(tmp_path, "server.ttl", """
+        @prefix rdfc: <https://w3id.org/rdf-connect#>.
+        <> a rdfc:PyRunnerServer;
+          rdfc:processorConfig "processors.ttl".
+    """)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    config = parse_server_config(config_path)
+
+    assert config.processor_paths == [os.path.realpath(str(tmp_path / "processors.ttl"))]
+
+
 def test_parse_server_config_unlimited_history(tmp_path):
     config_path = write(tmp_path, "server.ttl", """
         @prefix rdfc: <https://w3id.org/rdf-connect#>.

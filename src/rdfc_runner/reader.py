@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from abc import abstractmethod, ABC
 from collections.abc import AsyncIterable
 from logging import Logger
@@ -116,17 +117,38 @@ class ReaderInstance(Reader):
 
         async def push_to_consumer(consumer: MyIter, data: bytes):
             future = asyncio.Future()
-            consumer.push(data, lambda: future.set_result(None))
+
+            def delivered():
+                if not future.done():
+                    future.set_result(None)
+
+            try:
+                consumer.push(data, delivered)
+            except RuntimeError:
+                # Closed between the guard above and this push: nobody left to deliver to.
+                return
             await future
 
         async def push_to_consumers():
-            # Wait for all consumers to process the message
-            await asyncio.gather(
-                *[
-                    push_to_consumer(consumer, msg.data)
-                    for consumer in self.consumers
-                ]
-            )
+            # Wait for all consumers to process the message, unless the reader closes
+            # first: a consumer that is gone never signals, and the orchestrator still
+            # needs the ack (mirroring the streaming path below).
+            pushes = asyncio.gather(*[push_to_consumer(consumer, msg.data) for consumer in self.consumers])
+            aborted = asyncio.ensure_future(self._abort.wait())
+            try:
+                done, _ = await asyncio.wait([pushes, aborted], return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                aborted.cancel()
+            if pushes in done:
+                exc = pushes.exception()
+                if exc is not None:
+                    # The message could not be delivered; ack it anyway so the sending
+                    # pipeline is not left waiting on a message that will never process.
+                    self.logger.error(
+                        f"Delivering message {msg.globalSequenceNumber} on {self.uri} failed: {exc!r}")
+            else:
+                self.logger.debug(f"{self.uri} closed while a message was being consumed; acking it")
+                pushes.cancel()
 
             # Notify the orchestrator after all consumers have processed the message
             await self._notify_processed(msg.globalSequenceNumber, msg.channel)
@@ -149,9 +171,25 @@ class ReaderInstance(Reader):
             f"{self.uri} handling incoming streaming message with global sequence number {msg.globalSequenceNumber}")
 
         if self.closed:
-            # No consumer can read this stream any more; ack it without opening one.
-            self.logger.debug(f"{self.uri} is closed, stream {msg.globalSequenceNumber} is not processed")
-            await self._notify_processed(msg.globalSequenceNumber, msg.channel)
+            # No consumer can read this stream any more, but the sender's flow control
+            # still needs a receiving stream driving the per-chunk acks: drain it and only
+            # then ack the message as a whole.
+            self.logger.debug(f"{self.uri} is closed, stream {msg.globalSequenceNumber} is drained unconsumed")
+            receiving_stream = self.client.receiveStreamMessage()
+            await receiving_stream.write(
+                common_pb2.SendingStreamControl(globalSequenceNumber=msg.globalSequenceNumber)
+            )
+
+            async def drain():
+                idx = 0
+                async for chunk in receiving_stream:
+                    if self.tracker:
+                        self.tracker.record_message(len(chunk.data))
+                    await receiving_stream.write(common_pb2.SendingStreamControl(streamSequenceNumber=idx))
+                    idx += 1
+                await self._notify_processed(msg.globalSequenceNumber, msg.channel)
+
+            spawn_logged(drain(), self.logger, f"drain of a stream on closed reader {self.uri}")
             return
 
         # Start a receiving stream to receive the streaming messages over the stream message channel.
@@ -231,6 +269,8 @@ class ReaderInstance(Reader):
                 # stream it was handed. Wait for the fan-out to finish draining the stream
                 # so the global ack still comes after the last chunk was handled.
                 consumed.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consumed
                 await stream_exhausted.wait()
                 self.logger.debug(f"{self.uri} closed while handling a streaming message; acking it")
             await self._notify_processed(msg.globalSequenceNumber, msg.channel)

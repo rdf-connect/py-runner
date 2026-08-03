@@ -132,5 +132,11 @@ class State:
             runner.channels[key] = ChannelStats(uri=uri, role=role)
         return ChannelTracker(runner.channels[key])
 
+    def untrack_channel(self, runner_id: str, uri: str, role: ChannelRole) -> None:
+        """Drop a channel's stats entry again, e.g. when its registration is rolled back."""
+        runner = self._runners.get(runner_id)
+        if runner:
+            runner.channels.pop(f"{role}:{uri}", None)
+
     def snapshot(self) -> list[dict]:
         return [runner.to_json() for runner in (*self._runners.values(), *self._history)]

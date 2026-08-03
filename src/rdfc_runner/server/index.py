@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib.resources import files
 from logging import getLogger
 from pathlib import Path
@@ -51,26 +52,31 @@ def extract_processor_descriptions(processor_paths: Iterable[str]) -> list[Proce
     return descriptions
 
 
-def generate_index_graph(processor_paths: Iterable[str], cwd: str, hostname: str, grpc_port: int,
-                         base: str) -> Graph:
+@lru_cache(maxsize=1)
+def _prelude_text() -> str:
+    return files("rdfc_runner.server").joinpath("index_prelude.ttl").read_text()
+
+
+def generate_index_graph(descriptions: Iterable[ProcessorDescription], cwd: str, hostname: str,
+                         grpc_port: int, base: str) -> Graph:
     """Build the index document served at the HTTP root.
 
     It declares the rdfc:TcpRunner (with the `host:port` address the orchestrator must
     connect to), the SHACL shape for Python processor declarations, and a description of
     every processor the server hosts. All IRIs are absolute against `base` (the URL the
     server is reached on, with trailing slash), so the document is correct however the
-    server is addressed.
+    server is addressed. The descriptions come precomputed (extract_processor_descriptions):
+    parsing the catalog is base-independent and belongs at startup, not in a request handler.
     """
     graph = Graph()
-    prelude = files("rdfc_runner.server").joinpath("index_prelude.ttl").read_text()
-    graph.parse(data=prelude, format="turtle", publicID=base)
+    graph.parse(data=_prelude_text(), format="turtle", publicID=base)
 
     runner = URIRef(base + "pyRunner")
     graph.add((runner, RDF.type, RDFC.TcpRunner))
     graph.add((runner, RDFC.handlesSubjectsOf, RDFC.pyImplementationOf))
     graph.add((runner, RDFC.grpc, Literal(f"{hostname}:{grpc_port}")))
 
-    for description in extract_processor_descriptions(processor_paths):
+    for description in descriptions:
         subject = URIRef(description.uri)
         graph.add((subject, RDF.type, RDFC.Processor))
         if description.label is not None:
@@ -78,6 +84,11 @@ def generate_index_graph(processor_paths: Iterable[str], cwd: str, hostname: str
         if description.comment is not None:
             graph.add((subject, RDFS.comment, Literal(description.comment)))
         relative_path = os.path.relpath(description.source_file, cwd)
+        if relative_path == os.pardir or relative_path.startswith(os.pardir + os.sep):
+            # Clients normalize the '..' away and end up requesting a different, refused
+            # path: this IRI is advertised but can never be fetched from this server.
+            logger.warning(f"Processor config {description.source_file} lies outside the serving "
+                           f"root {cwd}; its advertised IRI will not be servable")
         graph.add((subject, RDFS.isDefinedBy, URIRef(base + relative_path)))
 
     return graph
@@ -85,4 +96,5 @@ def generate_index_graph(processor_paths: Iterable[str], cwd: str, hostname: str
 
 def generate_index_ttl(processor_paths: Iterable[str], cwd: str, hostname: str, grpc_port: int,
                        base: str) -> str:
-    return generate_index_graph(processor_paths, cwd, hostname, grpc_port, base).serialize(format="turtle")
+    descriptions = extract_processor_descriptions(processor_paths)
+    return generate_index_graph(descriptions, cwd, hostname, grpc_port, base).serialize(format="turtle")
