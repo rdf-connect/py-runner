@@ -48,7 +48,7 @@ class Writer(ABC):
 ### Implementations ###
 class WriterInstance(Writer):
     local_sequence_number: int
-    awaiting_processed: list[tuple[asyncio.Future, float, int]]
+    awaiting_processed: list[tuple[asyncio.Future, float, int, bool]]
     open_streams: int
     should_close: list[asyncio.Future]
 
@@ -64,6 +64,9 @@ class WriterInstance(Writer):
         self.awaiting_processed = []
         self.open_streams = 0
         self.should_close = []
+        # Whether any of the deferred closes in `should_close` was already issued by the
+        # orchestrator; the eventual close must not echo such a close back.
+        self._close_issued = False
 
     @property
     def uri(self) -> str:
@@ -83,7 +86,10 @@ class WriterInstance(Writer):
 
         # Initiate a sending stream with an RPC.sendStreamMessage. (6.3.4.3)
         sending_stream = self.client.sendStreamMessage()
-        handled_stream_msg = self.await_processed()
+        # The global ack arrives when the stream ends, however long it ran: recording it
+        # like a message would corrupt the channel stats with one 0-byte, stream-lifetime
+        # latency sample. The chunks below are the messages.
+        handled_stream_msg = self.await_processed(track=False)
         local_sequence_number = self.local_sequence_number
         self.local_sequence_number += 1
 
@@ -104,18 +110,23 @@ class WriterInstance(Writer):
         self.logger.debug(f"{self.uri} streams message with id {msg_id}")
 
         async for msg in buffer:
+            data = transform(msg)
+            started_at = time.monotonic()
+
             # Start a future to start listening for the processed acknowledgment of this chunk we are sending
             chunk_processed_future = asyncio.create_task(self.sending_stream_ready(sending_stream=sending_stream))
 
             # Send the chunk over the stream
             await sending_stream.write(
                 common_pb2.StreamChunk(
-                    data=common_pb2.DataChunk(data=transform(msg))
+                    data=common_pb2.DataChunk(data=data)
                 )
             )
 
             # Await a message on the stream, indicating that the chunk has been processed
             await chunk_processed_future
+            if self.tracker:
+                self.tracker.record_message(len(data), (time.monotonic() - started_at) * 1000)
 
         await sending_stream.done_writing()
 
@@ -123,7 +134,7 @@ class WriterInstance(Writer):
         self.open_streams -= 1
 
         if len(self.should_close) > 0:
-            await self.close()
+            await self.close(self._close_issued)
 
     async def buffer(self, buffer: bytes) -> None:
         """Write a buffer of bytes to the writer."""
@@ -156,10 +167,14 @@ class WriterInstance(Writer):
         else:
             raise ValueError("Unsupported AnyType object")
 
-    def await_processed(self, num_bytes: int = 0) -> asyncio.Future:
-        """Wait until all messages sent to the writer are processed."""
+    def await_processed(self, num_bytes: int = 0, track: bool = True) -> asyncio.Future:
+        """Wait until all messages sent to the writer are processed.
+
+        With `track=False` the eventual ack resolves the future without recording a
+        message in the channel stats (used for stream-level acks, which are not messages).
+        """
         event = asyncio.Future()
-        self.awaiting_processed.append((event, time.monotonic(), num_bytes))
+        self.awaiting_processed.append((event, time.monotonic(), num_bytes, track))
         return event
 
     async def sending_stream_ready(self, sending_stream: AsyncIterable) -> int:
@@ -175,12 +190,13 @@ class WriterInstance(Writer):
         Behavior:
         - If there are still active streams, closing is deferred until all streams are closed.
         - If multiple callers invoke `close()` while waiting, their Futures are queued and resolved once the channel actually closes.
-        - If this side initiated the close (`issued=True`), a close message is sent to the orchestrator.
+        - If this side initiated the close (`issued=False`), a close message is sent to the orchestrator; a close the orchestrator already issued (`issued=True`) is not echoed back, also when it was deferred.
 
-        @param issued: Whether this side initiated the close.
+        @param issued: Whether the orchestrator already issued this close.
         """
         # Case 1: Active streams are still running, so wait until they finish.
         if self.open_streams > 0:
+            self._close_issued = self._close_issued or issued
             close_future = asyncio.Future()
             self.should_close.append(close_future)
             await close_future
@@ -205,8 +221,8 @@ class WriterInstance(Writer):
     def handled(self):
         """Notify that a message has been processed."""
         if len(self.awaiting_processed) > 0:
-            event, started_at, num_bytes = self.awaiting_processed.pop(0)
-            if self.tracker:
+            event, started_at, num_bytes, track = self.awaiting_processed.pop(0)
+            if track and self.tracker:
                 self.tracker.record_message(num_bytes, (time.monotonic() - started_at) * 1000)
             if not event.done():
                 event.set_result(None)

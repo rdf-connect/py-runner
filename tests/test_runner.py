@@ -4,7 +4,7 @@ import logging
 
 import pytest
 from google.protobuf import empty_pb2
-from rdfc_proto import service_pb2, service_pb2_grpc
+from rdfc_proto import common_pb2, service_pb2, service_pb2_grpc
 
 from rdfc_runner.runner import Runner
 
@@ -110,6 +110,51 @@ async def test_channel_of_a_failed_processor_can_be_recreated():
     assert not captured[-1].initialized.HasField("error")
 
 
+async def test_failed_processor_leaves_no_phantom_channel_stats():
+    """In server mode the channel registrations also created stats entries; a rollback
+    that keeps those shows phantom channels on the dashboard for the runner's lifetime."""
+    from rdfc_runner.server.state import State
+
+    state = State()
+    runner_id = state.register_runner("127.0.0.1", "urn:test:runner")
+    runner = Runner("urn:test:runner", state=state, runner_id=runner_id)
+    runner.logger = logging.getLogger("test")
+    runner._client = None
+
+    async def write(msg):
+        pass
+
+    runner._write = write
+
+    await runner.add_processor(
+        failing_processor(arguments=channel_args("urn:channel:in", "urn:channel:out"))
+    )
+
+    [stats] = state.snapshot()
+    assert stats["channels"] == {}
+
+
+async def test_rolled_back_reader_is_closed():
+    """The discarded reader must not linger half-open: a message that still races in on
+    its channel would otherwise be pushed to consumers of a processor that never existed."""
+    captured = []
+    runner = make_runner(captured)
+    created = []
+    original_create_reader = runner.create_reader
+
+    def spying_create_reader(uri):
+        reader = original_create_reader(uri)
+        created.append(reader)
+        return reader
+
+    runner.create_reader = spying_create_reader
+
+    await runner.add_processor(failing_processor(arguments=channel_args("urn:channel:in")))
+
+    assert runner._readers == {}
+    assert [reader.closed for reader in created] == [True]
+
+
 async def test_failed_processor_keeps_channels_of_earlier_processors():
     captured = []
     runner = make_runner(captured)
@@ -121,6 +166,19 @@ async def test_failed_processor_keeps_channels_of_earlier_processors():
 
     # The rollback removes what the failed processor registered, not what was already there.
     assert runner._readers["urn:channel:shared"] is established
+
+
+async def test_close_message_does_not_block_the_listener_on_an_open_stream():
+    """The deferred writer close resolves only after a 'processed' ack that this same
+    (strictly sequential) listener must dispatch: awaiting the close inline deadlocks."""
+    captured = []
+    runner = make_runner(captured)
+    runner.create_reader("urn:channel:shared")
+    writer = runner.create_writer("urn:channel:shared")
+    writer.open_streams = 1  # a processor is inside stream()
+
+    close_msg = service_pb2.ToRunner(close=common_pb2.Close(channel="urn:channel:shared"))
+    await asyncio.wait_for(runner.handle_orchestrator_message(close_msg), timeout=1)
 
 
 class EndingStream:

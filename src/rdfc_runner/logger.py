@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from contextvars import ContextVar
 from logging import getLogger
 from typing import Optional, Tuple
@@ -9,16 +10,41 @@ from rdfc_proto import service_pb2_grpc, service_pb2
 # Identifies the runner active in the current asyncio context: (runner uri, log message queue).
 # Tasks created by a runner inherit its context, so log records emitted anywhere in that task tree
 # are routed to the right gRPC log stream, even when multiple runners share one process (server
-# mode). Log records emitted from foreign threads (without the context) are dropped.
+# mode). Log records emitted from foreign threads (without the context) fall back to stderr.
 _log_context: ContextVar[Optional[Tuple[str, asyncio.Queue]]] = ContextVar("rdfc_log_context", default=None)
 
 
+class _StderrFallbackHandler(logging.StreamHandler):
+    """Handles the records no runner context can claim, writing them to stderr.
+
+    The stream is late-bound: redirections of sys.stderr (tests, service managers) keep
+    working even though this handler outlives them.
+    """
+
+    def __init__(self):
+        logging.Handler.__init__(self)
+        self.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+
+    @property
+    def stream(self):
+        return sys.stderr
+
+
+_fallback_handler = _StderrFallbackHandler()
+
+
 class _ContextRoutingHandler(logging.Handler):
-    """Forwards records on the 'rdfc' logger to the log queue of the context's runner."""
+    """Forwards records on the 'rdfc' logger to the log queue of the context's runner.
+
+    Records emitted outside any runner context (a raw thread, an executor that does not
+    propagate contextvars) have no orchestrator log stream to go to; they fall back to
+    stderr instead of vanishing.
+    """
 
     def emit(self, record: logging.LogRecord) -> None:
         context = _log_context.get()
         if context is None:
+            _fallback_handler.handle(record)
             return
         uri, queue = context
         log_message = service_pb2.LogMessage(

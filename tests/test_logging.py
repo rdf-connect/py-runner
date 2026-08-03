@@ -48,6 +48,20 @@ async def test_routing_handler_installed_only_once():
     assert len(handlers) == 1
 
 
+async def test_records_without_context_fall_back_to_stderr(capsys):
+    """A raw thread (or an executor that does not propagate contextvars) has no runner
+    context to route to; those records must not silently vanish."""
+    import threading
+
+    GrpcLogger(FakeStub(), "urn:a")  # installs the routing handler
+
+    thread = threading.Thread(target=lambda: logging.getLogger("rdfc.proc").info("from a thread"))
+    thread.start()
+    thread.join()
+
+    assert "from a thread" in capsys.readouterr().err
+
+
 async def test_close_terminates_log_stream():
     grpc_logger = GrpcLogger(FakeStub(), "urn:a")
     task = asyncio.create_task(grpc_logger.run())

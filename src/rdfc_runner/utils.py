@@ -76,7 +76,9 @@ def fanout_stream(
     `abort` releases the barrier from the outside: a consumer generator that is dropped while
     suspended inside the stream never runs its `finally`, so its slot in the barrier would
     otherwise stall the source forever. Setting the event makes the pump stop waiting for the
-    consumers and drain the source instead.
+    consumers: chunks are still delivered to whoever is left — a consumer that is actively
+    iterating receives the rest of the stream, not a silently truncated end — but each chunk
+    is acked immediately so a consumer that is gone cannot stall the source.
     """
 
     _end = object()  # Sentinel signalling the end of the stream.
@@ -128,9 +130,17 @@ def fanout_stream(
         nonlocal pending, chunk_handled, chunk_acked
         try:
             async for chunk in stream:
-                if not active or (abort is not None and abort.is_set()):
+                if not active:
                     # Nobody is going to handle this chunk; ack it anyway and keep draining
                     # so the sender's flow control completes.
+                    await ack_chunk()
+                    continue
+                if abort is not None and abort.is_set():
+                    # Aborted: stop gating on the barrier (a consumer that is gone would
+                    # stall it forever) but keep delivering, so a consumer that is still
+                    # iterating receives the rest of the stream instead of a truncated end.
+                    for consumer_id in set(active):
+                        queues[consumer_id].put_nowait(chunk)
                     await ack_chunk()
                     continue
                 pending = set(active)

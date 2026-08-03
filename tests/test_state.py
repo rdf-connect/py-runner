@@ -119,3 +119,23 @@ def test_tracking_the_same_channel_twice_reuses_its_record():
     [runner] = state.snapshot()
     assert list(runner["channels"]) == ["reader:urn:channel"]
     assert runner["channels"]["reader:urn:channel"]["bytesTotal"] == 3
+
+
+def test_untrack_channel_removes_the_stats_entry():
+    state = State()
+    runner_id = state.register_runner("127.0.0.1", "urn:runner")
+    state.track_channel(runner_id, "urn:channel", "reader")
+    state.track_channel(runner_id, "urn:channel", "writer")
+
+    state.untrack_channel(runner_id, "urn:channel", "reader")
+
+    [runner] = state.snapshot()
+    assert list(runner["channels"]) == ["writer:urn:channel"]
+
+
+def test_untrack_channel_tolerates_unknown_entries():
+    state = State()
+    runner_id = state.register_runner("127.0.0.1", "urn:runner")
+
+    state.untrack_channel(runner_id, "urn:channel", "reader")
+    state.untrack_channel("no-such-runner", "urn:channel", "reader")

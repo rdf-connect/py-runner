@@ -28,11 +28,18 @@ class ServerConfig:
     history_size: int = DEFAULT_HISTORY_SIZE
 
 
-def iri_to_path(value) -> str:
-    """Resolve a file IRI (or plain path literal) to a canonical filesystem path."""
+def iri_to_path(value, base_dir: str | None = None) -> str:
+    """Resolve a file IRI (or plain path literal) to a canonical filesystem path.
+
+    A relative plain path resolves against `base_dir` — the directory of the document
+    that mentioned it — not against the process' working directory, which depends on how
+    the server happened to be launched.
+    """
     text = str(value)
     if text.startswith("file://"):
         text = url2pathname(urlparse(text).path)
+    elif base_dir is not None and not os.path.isabs(text):
+        text = os.path.join(base_dir, text)
     return os.path.realpath(text)
 
 
@@ -72,7 +79,10 @@ def parse_server_config(path: str) -> ServerConfig:
     grpc_port = graph.value(subject, RDFC.grpcPort)
     hostname = graph.value(subject, RDFC.hostname)
     history_size = graph.value(subject, RDFC.historySize)
-    processor_paths = sorted(iri_to_path(o) for o in graph.objects(subject, RDFC.processorConfig))
+    processor_paths = sorted(
+        iri_to_path(o, base_dir=os.path.dirname(config_path))
+        for o in graph.objects(subject, RDFC.processorConfig)
+    )
 
     return ServerConfig(
         http_port=_as_int(http_port, "httpPort", DEFAULT_HTTP_PORT, config_path),

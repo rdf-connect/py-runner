@@ -11,7 +11,7 @@ from aiohttp import web
 from ..runner import Runner
 from .bridge import HandshakeError, SocketBridge, read_uri_line
 from .config import ServerConfig, parse_server_config
-from .index import generate_index_ttl
+from .index import extract_processor_descriptions, generate_index_graph
 from .state import State
 from .whitelist import build_whitelist
 
@@ -31,21 +31,34 @@ class RunnerServer:
 
     def __init__(self, config: ServerConfig, cwd: str | None = None):
         self.config = config
-        # The HTTP root maps onto the directory holding the server config, not onto the
-        # process' working directory: the orchestrator resolves the served file IRIs against
-        # that document, and a root elsewhere would advertise '..'-containing IRIs that this
-        # server then refuses to serve. `cwd` stays overridable for tests.
-        self.cwd = cwd if cwd is not None else os.path.dirname(os.path.realpath(config.config_path))
         self.whitelist = build_whitelist(config.processor_paths)
+        # The HTTP root maps onto the common ancestor of the server config's directory and
+        # every whitelisted file — never onto the process' working directory: the
+        # orchestrator resolves the served file IRIs against the index document, and a root
+        # that does not contain a served file would advertise '..'-containing IRIs that RFC
+        # 3986 clients normalize into paths this server then refuses to serve. `cwd` stays
+        # overridable for tests.
+        config_dir = os.path.dirname(os.path.realpath(config.config_path))
+        if cwd is not None:
+            self.cwd = cwd
+        elif self.whitelist:
+            self.cwd = os.path.commonpath([config_dir, *self.whitelist])
+        else:
+            self.cwd = config_dir
         self.state = State(history_size=config.history_size)
         self._connections: set[asyncio.Task] = set()
         self._stopping = False
+        # Parsing the processor catalog is base-independent; it happens once here, not in
+        # the request handler — the cache below is keyed on the client-controlled Host
+        # header, so a miss must stay cheap (graph assembly, no file I/O or parsing).
+        self._descriptions = extract_processor_descriptions(config.processor_paths)
+        self._dashboard_html = files("rdfc_runner.server").joinpath("dashboard.html").read_text()
         # The index depends only on the requested base URL; cache a bounded number of variants.
         self._index_for = lru_cache(maxsize=32)(self._generate_index)
 
     def _generate_index(self, base: str) -> str:
-        return generate_index_ttl(self.config.processor_paths, self.cwd, self.config.hostname,
-                                  self.config.grpc_port, base)
+        return generate_index_graph(self._descriptions, self.cwd, self.config.hostname,
+                                    self.config.grpc_port, base).serialize(format="turtle")
 
     ### HTTP ###
 
@@ -78,8 +91,7 @@ class RunnerServer:
         return web.json_response(self.state.snapshot())
 
     async def _handle_dashboard(self, _request: web.Request) -> web.Response:
-        html = files("rdfc_runner.server").joinpath("dashboard.html").read_text()
-        return web.Response(text=html, content_type="text/html")
+        return web.Response(text=self._dashboard_html, content_type="text/html")
 
     async def _handle_index(self, request: web.Request) -> web.Response:
         base = f"{request.scheme}://{request.host}/"

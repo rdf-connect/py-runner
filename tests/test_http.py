@@ -78,6 +78,48 @@ async def test_serving_root_is_the_config_directory(tmp_path, monkeypatch):
         await client.close()
 
 
+async def test_processor_config_outside_the_config_dir_is_advertised_and_served(tmp_path):
+    """A processor config in a sibling of the config directory must not be advertised with
+    '..' segments: clients normalize those away and the fetch ends in a 403. The serving
+    root widens to the common ancestor instead."""
+    from urllib.parse import urlparse
+
+    from rdflib import RDFS
+
+    config_dir = tmp_path / "conf"
+    shared = tmp_path / "shared"
+    config_dir.mkdir()
+    shared.mkdir()
+    (shared / "processors.ttl").write_text(PROCESSORS_TTL)
+    (shared / "helper.ttl").write_text("")
+
+    config = ServerConfig(
+        http_port=0,
+        grpc_port=50999,
+        processor_paths=[str(shared / "processors.ttl")],
+        config_path=str(config_dir / "server.ttl"),
+        hostname="runner.example",
+    )
+    server = RunnerServer(config)
+
+    client = TestClient(TestServer(server.make_app()))
+    await client.start_server()
+    try:
+        index = await (await client.get("/")).text()
+        assert ".." not in index
+
+        graph = Graph()
+        graph.parse(data=index, format="turtle")
+        defined_by = graph.value(RDFC.TestProcessor, RDFS.isDefinedBy)
+        assert defined_by is not None
+
+        response = await client.get(urlparse(str(defined_by)).path)
+        assert response.status == 200
+        assert "TestProcessor" in await response.text()
+    finally:
+        await client.close()
+
+
 async def test_health(client):
     response = await client.get("/health")
 
@@ -122,6 +164,17 @@ async def test_index_uses_request_host(client):
     # The processor's definition file is referenced relative to the served base.
     processor = RDFC.TestProcessor
     assert graph.value(processor, RDF.type) == RDFC.Processor
+
+
+async def test_index_catalog_is_parsed_once_at_startup(server, client, tmp_path):
+    """Parsing the processor catalog is base-independent and happens at construction: a
+    client rotating Host headers must not be able to force a full re-parse per request
+    (the index cache is keyed on the client-controlled Host)."""
+    (tmp_path / "processors.ttl").write_text("")  # would drop the processor if re-parsed
+
+    response = await client.get("/")
+
+    assert "TestProcessor" in await response.text()
 
 
 async def test_whitelisted_file_served(client):
