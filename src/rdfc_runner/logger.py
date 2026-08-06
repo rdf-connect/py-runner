@@ -5,6 +5,8 @@ from contextvars import ContextVar
 from logging import getLogger
 from typing import Optional, Tuple
 
+import grpc
+import grpc.aio
 from rdfc_proto import service_pb2_grpc, service_pb2
 
 # Identifies the runner active in the current asyncio context: (runner uri, log message queue).
@@ -86,5 +88,18 @@ class Logger:
             yield msg
 
     async def run(self):
-        """Run the background gRPC log stream."""
-        await self._stub.logStream(self._message_stream())
+        """Run the background gRPC log stream until the orchestrator or we close it.
+
+        At the end of a pipeline the orchestrator tears down the connection (in remote
+        server mode it simply closes the bridged TCP socket). The still-open log stream RPC
+        then terminates with a transport-level status such as UNAVAILABLE ("Socket closed")
+        or CANCELLED. That is expected shutdown, not a failure, so it must not bubble up to
+        the background-task handler and be logged as a spurious ERROR.
+        """
+        try:
+            await self._stub.logStream(self._message_stream())
+        except grpc.aio.AioRpcError as exc:
+            if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED):
+                getLogger(__name__).debug("Log stream closed during shutdown: %s", exc.code())
+                return
+            raise

@@ -105,7 +105,8 @@ statistics as JSON), and `/dashboard` (a live HTML view of the same). Next to th
 are currently connected, these keep the last `rdfc:historySize` finished runs (default 5;
 `-1` keeps all of them, `0` none), so a pipeline run remains visible after it completed.
 
-See [`examples/echo`](examples/echo) for a complete example.
+See [`tests/e2e`](tests/e2e) for a complete, runnable pipeline. It doubles as the
+project's end-to-end test.
 
 ## Docker
 
@@ -115,13 +116,13 @@ files, and the processor modules (added to `PYTHONPATH` via `/config/processors`
 
 ```shell
 docker build -t rdfc/py-runner .
-docker run -p 3000:3000 -p 50051:50051 -v ./examples/echo:/config:ro rdfc/py-runner
+docker run -p 3000:3000 -p 4001:4001 -v ./tests/e2e:/config:ro rdfc/py-runner
 ```
 
 Or with the compose example:
 
 ```shell
-docker compose -f examples/echo/docker-compose.yml up --build
+docker compose -f tests/e2e/docker-compose.yml up --build
 ```
 
 For real deployments with published processor packages, extend the image instead of mounting code:
@@ -147,6 +148,17 @@ The test suite uses [pytest](https://docs.pytest.org):
 ```shell
 uv run pytest
 ```
+
+An additional end-to-end test lives in [`tests/e2e`](tests/e2e): a runnable echo pipeline
+driven by the real RDF-Connect orchestrator. It is excluded from the default run (it needs
+Node and the orchestrator) and is opt-in via its marker:
+
+```shell
+uv run pytest -m e2e tests/e2e
+```
+
+See [`tests/e2e/README.md`](tests/e2e/README.md) for the one-time `npm install` and for
+running the same pipeline manually during development.
 
 ## Logging
 
@@ -243,8 +255,7 @@ py-runner/                # Root directory of the project
 │       ├── types.py      # Contains type definitions and classes used throughout the package
 │       ├── utils.py      # Utility functions used by the runner
 │       └── writer.py     # Contains the main logic for the Python writer
-├── examples/             # Example configurations (see examples/echo)
-├── tests/                # Directory for unit tests
+├── tests/                # Unit tests, plus tests/e2e (a runnable end-to-end pipeline)
 ├── Dockerfile            # Docker image for the remote runner server
 └── pyproject.toml        # Project metadata and build configuration
 ```

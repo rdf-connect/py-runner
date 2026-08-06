@@ -1,5 +1,7 @@
 import asyncio
 import contextlib
+import errno
+import gc
 import os
 import signal
 from functools import lru_cache
@@ -16,6 +18,27 @@ from .state import State
 from .whitelist import build_whitelist
 
 logger = getLogger("rdfc_runner.server")
+
+
+class ServerStartupError(Exception):
+    """A listener could not be opened, e.g. because its port is already in use.
+
+    Raised instead of letting a raw ``OSError`` traceback escape, so the CLI can print a
+    single actionable line and exit cleanly.
+    """
+
+
+def _bind_error(exc: OSError, purpose: str, port: int) -> ServerStartupError:
+    """Turn a bind ``OSError`` into an actionable ServerStartupError message."""
+    if exc.errno == errno.EADDRINUSE:
+        detail = (
+            f"port {port} is already in use — another py-runner-server (or a different process) "
+            f"is likely still listening on it. Stop it, or set a different "
+            f"rdfc:{'grpcPort' if purpose == 'gRPC' else 'httpPort'} in the server config."
+        )
+    else:
+        detail = f"could not bind port {port}: {exc.strerror or exc}"
+    return ServerStartupError(f"Cannot start the {purpose} listener: {detail}")
 
 MAX_GRPC_CONNECTIONS = 32
 MAX_REQUEST_SIZE = 64 * 1024
@@ -195,12 +218,24 @@ async def serve(config_path: str) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    tcp_server = await asyncio.start_server(server.handle_orchestrator, "0.0.0.0", config.grpc_port)
+    try:
+        tcp_server = await asyncio.start_server(
+            server.handle_orchestrator, "0.0.0.0", config.grpc_port
+        )
+    except OSError as e:
+        raise _bind_error(e, "gRPC", config.grpc_port) from None
 
     app_runner = web.AppRunner(server.make_app())
     await app_runner.setup()
     site = web.TCPSite(app_runner, "0.0.0.0", config.http_port)
-    await site.start()
+    try:
+        await site.start()
+    except OSError as e:
+        # The gRPC listener already opened; roll it back so a failed start leaks nothing.
+        tcp_server.close()
+        await tcp_server.wait_closed()
+        await app_runner.cleanup()
+        raise _bind_error(e, "HTTP", config.http_port) from None
 
     logger.info(f"py-runner server listening: http://0.0.0.0:{config.http_port} "
                 f"(/, /health, /api/state, /dashboard), gRPC TCP on port {config.grpc_port}")
@@ -212,3 +247,10 @@ async def serve(config_path: str) -> None:
     finally:
         await server.shutdown(tcp_server)
         await app_runner.cleanup()
+        # grpc's aio channels sit in reference cycles, so refcounting alone never frees the
+        # channel a finished runner used; only a cyclic GC pass reclaims it. Force one now,
+        # while the event loop and interpreter are still healthy: reclaiming the last channel
+        # here joins grpc's completion-queue poller thread in-loop. Left to interpreter
+        # finalization, that same thread join raises PythonFinalizationError on Python 3.13+,
+        # printing a spurious traceback on every Ctrl+C after a pipeline has run.
+        gc.collect()

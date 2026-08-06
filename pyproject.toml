@@ -36,6 +36,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "e2e: end-to-end tests that require Node and the RDF-Connect orchestrator (opt-in; run with `-m e2e`)",
+]
+addopts = "-m 'not e2e'"
 
 [build-system]
 requires = ["hatchling"]

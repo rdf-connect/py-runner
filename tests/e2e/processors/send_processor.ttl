@@ -1,0 +1,24 @@
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+@prefix sh: <http://www.w3.org/ns/shacl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+
+rdfc:PySendProcessor rdfc:pyImplementationOf rdfc:Processor;
+  rdfs:label "Send processor";
+  rdfs:comment "Sends the configured string messages to a writer";
+  rdfc:modulePath "echo_processor";
+  rdfc:class "SendProcessor".
+
+[ ] a sh:NodeShape;
+  sh:targetClass rdfc:PySendProcessor;
+  sh:property [
+    sh:path rdfc:writer;
+    sh:codeIdentifier "writer";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:class rdfc:Writer;
+  ], [
+    sh:path rdfc:msg;
+    sh:codeIdentifier "msgs";
+    sh:datatype xsd:string;
+  ].

@@ -1,6 +1,8 @@
 import asyncio
 import logging
 
+import grpc
+import grpc.aio
 import pytest
 
 from rdfc_runner.logger import Logger as GrpcLogger, _ContextRoutingHandler
@@ -11,6 +13,20 @@ class FakeStub:
     async def logStream(self, iterator):
         async for _ in iterator:
             pass
+
+
+def _aio_rpc_error(code: grpc.StatusCode, details: str) -> grpc.aio.AioRpcError:
+    return grpc.aio.AioRpcError(code, grpc.aio.Metadata(), grpc.aio.Metadata(), details=details)
+
+
+class FailingStub:
+    """A stub whose logStream terminates with a gRPC status, as the transport does on teardown."""
+
+    def __init__(self, error: grpc.aio.AioRpcError):
+        self._error = error
+
+    async def logStream(self, iterator):
+        raise self._error
 
 
 def drain(queue: asyncio.Queue):
@@ -69,6 +85,22 @@ async def test_close_terminates_log_stream():
     grpc_logger.close()
 
     await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.parametrize("code", [grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED])
+async def test_log_stream_ignores_transport_teardown(code):
+    """At end of pipeline the orchestrator tears down the connection; the still-open log
+    stream RPC then ends with a transport status. That is expected shutdown, so run() must
+    return quietly instead of raising (which would be logged as a spurious ERROR)."""
+    grpc_logger = GrpcLogger(FailingStub(_aio_rpc_error(code, "Socket closed")), "urn:a")
+    await asyncio.wait_for(grpc_logger.run(), timeout=1)
+
+
+async def test_log_stream_reraises_unexpected_rpc_error():
+    """A genuine log-stream failure (not a shutdown status) must still surface."""
+    grpc_logger = GrpcLogger(FailingStub(_aio_rpc_error(grpc.StatusCode.INTERNAL, "kaput")), "urn:a")
+    with pytest.raises(grpc.aio.AioRpcError):
+        await asyncio.wait_for(grpc_logger.run(), timeout=1)
 
 
 @pytest.mark.parametrize("value,expected", [

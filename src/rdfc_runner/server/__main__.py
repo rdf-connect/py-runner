@@ -3,7 +3,8 @@ import logging
 import os
 import sys
 
-from .app import serve
+from .app import serve, ServerStartupError
+from .config import ConfigError
 
 LOG_LEVELS = {
     "debug": logging.DEBUG,
@@ -26,7 +27,12 @@ def main() -> None:
 
     level = resolve_log_level(os.environ.get("LOG_LEVEL", "info"))
     logging.basicConfig(level=level, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    asyncio.run(serve(sys.argv[1]))
+    try:
+        asyncio.run(serve(sys.argv[1]))
+    except (ServerStartupError, ConfigError) as e:
+        # Expected, user-actionable startup failures: report the reason, not a traceback.
+        logging.getLogger("rdfc_runner.server").error(str(e))
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
