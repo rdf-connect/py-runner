@@ -1,0 +1,10 @@
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+<> a rdfc:PyRunnerServer;
+  rdfc:httpPort 3000;
+  rdfc:grpcPort 4001;
+  rdfc:hostname "localhost";
+  rdfc:processorConfig
+    <./processors/send_processor.ttl>,
+    <./processors/echo_processor.ttl>,
+    <./processors/log_processor.ttl>.
