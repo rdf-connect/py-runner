@@ -87,11 +87,14 @@ class WriterInstance(Writer):
         # Initiate a sending stream with an RPC.sendStreamMessage. (6.3.4.3)
         sending_stream = self.client.sendStreamMessage()
         # The global ack arrives when the stream ends, however long it ran: recording it
-        # like a message would corrupt the channel stats with one 0-byte, stream-lifetime
-        # latency sample. The chunks below are the messages.
+        # like a per-chunk message would corrupt the channel stats with one 0-byte,
+        # stream-lifetime latency sample. The chunks below are the per-message stats; the
+        # stream itself is recorded once, separately, when it completes (see record_stream).
         handled_stream_msg = self.await_processed(track=False)
         local_sequence_number = self.local_sequence_number
         self.local_sequence_number += 1
+        stream_started_at = time.monotonic()
+        stream_bytes_total = 0
 
         # Send the stream message notification
         await sending_stream.write(
@@ -125,12 +128,17 @@ class WriterInstance(Writer):
 
             # Await a message on the stream, indicating that the chunk has been processed
             await chunk_processed_future
+            stream_bytes_total += len(data)
             if self.tracker:
                 self.tracker.record_message(len(data), (time.monotonic() - started_at) * 1000)
 
         await sending_stream.done_writing()
 
         await handled_stream_msg
+        # Record the stream as a single, distinct entry: its total size and full lifetime,
+        # kept apart from the per-chunk message stats above.
+        if self.tracker:
+            self.tracker.record_stream(stream_bytes_total, (time.monotonic() - stream_started_at) * 1000)
         self.open_streams -= 1
 
         if len(self.should_close) > 0:

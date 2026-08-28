@@ -3,7 +3,7 @@ import importlib
 import json
 import traceback
 from logging import getLogger, Logger
-from typing import List, Any, Dict
+from typing import Any, Callable, Dict, List, Optional
 
 import grpc.aio
 from rdfc_proto import service_pb2_grpc, service_pb2, common_pb2
@@ -32,7 +32,8 @@ class Runner:
     _processors: List[Processor]
     _processor_transforms: List[asyncio.Task]
 
-    def __init__(self, runner_iri: str, state=None, runner_id: str | None = None):
+    def __init__(self, runner_iri: str,
+                 track_channel: Optional[Callable[[str, str], Any]] = None):
         self.uri = runner_iri
         self.pipeline = None
         self._readers = dict()
@@ -41,9 +42,10 @@ class Runner:
         self._processor_transforms = []
         self._grpc_logger = None
         self._log_stream_task = None
-        # Optional server-mode statistics (rdfc_runner.server.state.State).
-        self._state = state
-        self._runner_id = runner_id
+        # Optional factory (uri, role) -> tracker, supplied in server mode to record channel
+        # statistics. The runner stays decoupled from the server's State: it only calls this
+        # opaque callback, so nothing but the server itself mutates that state.
+        self._track_channel_factory = track_channel
 
     async def connect(self, stub: service_pb2_grpc.RunnerStub):
         self._client = stub
@@ -71,36 +73,9 @@ class Runner:
         self._log_stream_task = spawn_logged(self._grpc_logger.run(), getLogger(__name__), "gRPC log stream")
 
     def _track_channel(self, uri: str, role: str):
-        if self._state is not None and self._runner_id is not None:
-            return self._state.track_channel(self._runner_id, uri, role)
+        if self._track_channel_factory is not None:
+            return self._track_channel_factory(uri, role)
         return None
-
-    def _untrack_channel(self, uri: str, role: str) -> None:
-        if self._state is not None and self._runner_id is not None:
-            self._state.untrack_channel(self._runner_id, uri, role)
-
-    def _rollback_registrations(self, current: dict, before: dict, role: str) -> None:
-        """Undo the channel registrations made since `before` was snapshotted.
-
-        Only what this call added is dropped: a channel that already existed keeps the
-        instance it had, so a processor that failed to initialize cannot take a working
-        channel with it. The side effects of a registration are rolled back along with it:
-        the stats entry a fresh registration created, and the discarded reader is closed
-        so a message racing in on it is acked instead of pushed to a processor that never
-        came up.
-        """
-        for uri, instance in list(current.items()):
-            if uri in before and before[uri] is instance:
-                continue
-            if uri not in before:
-                del current[uri]
-                # A re-registration reused the stats entry of the instance it displaced,
-                # which the restored instance still feeds; only a fresh one is dropped.
-                self._untrack_channel(uri, role)
-            else:
-                current[uri] = before[uri]
-            if role == "reader":
-                instance.close()
 
     def create_reader(self, uri: str) -> Reader:
         reader = ReaderInstance(uri, self._client, self._write, self.logger,
@@ -168,12 +143,6 @@ class Runner:
     async def add_processor(self, processor: service_pb2.Processor):
         # Start the processor with the given configuration.
         self.logger.debug(f"Adding processor {processor.uri}")
-        # parse_args registers a reader/writer per channel argument before the processor
-        # itself can be imported or initialized; a failure below must not leave those
-        # registrations behind, or messages on them would be routed to a processor that
-        # does not exist.
-        readers_before = dict(self._readers)
-        writers_before = dict(self._writers)
         try:
             args = AttrDict(parse_args(processor.arguments, self))
 
@@ -188,14 +157,15 @@ class Runner:
             await instance.init()
         except Exception as e:
             self.logger.error(f"Failed to initialize processor {processor.uri}:\n{traceback.format_exc()}")
-            self._rollback_registrations(self._readers, readers_before, "reader")
-            self._rollback_registrations(self._writers, writers_before, "writer")
             ### 2.1. Notify the orchestrator that the processor failed to initiate using an RPC.init message.
             await self._write(service_pb2.FromRunner(initialized=service_pb2.ProcessorInitialized(
                 uri=processor.uri,
                 error=common_pb2.Error(cause=f"{type(e).__name__}: {e}"),
             )))
-            return None
+            # A processor that cannot come up brings the whole runner down: re-raise so the
+            # pipeline is torn down rather than left running with a missing processor whose
+            # channels would silently swallow or stall every message routed to them.
+            raise
         self.logger.info(f"Processor {processor.uri} initialized")
 
         self._processors.append(instance)
@@ -212,7 +182,7 @@ class Runner:
         async for message in normal_stream:
             await self.handle_orchestrator_message(message)
 
-    async def start(self):
+    async def run_processors(self):
         await asyncio.gather(*(p.produce() for p in self._processors))
         await asyncio.gather(*self._processor_transforms)
 
@@ -259,7 +229,7 @@ class Runner:
         start_task: asyncio.Task | None = None
 
         def on_start_done(task: asyncio.Task) -> None:
-            # Resolve `processors_ended` with the outcome of `start()`, propagating failures.
+            # Resolve `processors_ended` with the outcome of `run_processors()`, propagating failures.
             if processors_ended.done():
                 return
             if task.cancelled():
@@ -285,9 +255,9 @@ class Runner:
 
                     ### 3. The orchestrator starts the pipeline by sending a RPC.start message to each runner. (6.2.1.4)
                     elif msg.HasField('start'):
-                        # Execute the start function of each processor instantiation.
+                        # Run each processor instantiation to completion.
                         # Wait (in the background) until all processors are done executing, and then resolve the task.
-                        start_task = asyncio.create_task(self.start())
+                        start_task = asyncio.create_task(self.run_processors())
                         start_task.add_done_callback(on_start_done)
 
                     ### 4. Handle incoming messages by the orchestrator. (6.2.2 / 6.3.4)
@@ -328,7 +298,7 @@ class Runner:
                 self._cancel_pipeline_tasks(start_task)
 
     def _cancel_pipeline_tasks(self, start_task: asyncio.Task | None) -> None:
-        """Cancel the tasks driving the pipeline: `start()` and the processor transforms."""
+        """Cancel the tasks driving the pipeline: `run_processors()` and the processor transforms."""
         for task in [start_task, *self._processor_transforms]:
             if task is not None and not task.done():
                 task.cancel()

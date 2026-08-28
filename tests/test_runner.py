@@ -40,15 +40,9 @@ def failing_processor(uri: str = "urn:test:processor", arguments: str = "{}") ->
     )
 
 
-def working_processor(uri: str = "urn:test:processor", arguments: str = "{}") -> service_pb2.Processor:
-    return service_pb2.Processor(
-        uri=uri,
-        config=json.dumps({"module_path": "fake_processor", "clazz": "FakeProcessor"}),
-        arguments=arguments,
-    )
-
-
-async def test_add_processor_reports_import_error_to_orchestrator():
+async def test_add_processor_reports_import_error_and_raises():
+    """A processor that cannot be imported is reported to the orchestrator and then raises,
+    so the caller can tear the whole runner down."""
     captured = []
     runner = make_runner(captured)
 
@@ -58,16 +52,16 @@ async def test_add_processor_reports_import_error_to_orchestrator():
         arguments=json.dumps({}),
     )
 
-    instance = await runner.add_processor(processor)
+    with pytest.raises(ModuleNotFoundError):
+        await runner.add_processor(processor)
 
-    assert instance is None
     assert len(captured) == 1
     initialized = captured[0].initialized
     assert initialized.uri == "urn:test:processor"
     assert "ModuleNotFoundError" in initialized.error.cause
 
 
-async def test_add_processor_reports_init_failure_to_orchestrator():
+async def test_add_processor_reports_init_failure_and_raises():
     captured = []
     runner = make_runner(captured)
 
@@ -78,94 +72,30 @@ async def test_add_processor_reports_init_failure_to_orchestrator():
         arguments=json.dumps({}),
     )
 
-    instance = await runner.add_processor(processor)
+    with pytest.raises(AttributeError):
+        await runner.add_processor(processor)
 
-    assert instance is None
     assert "AttributeError" in captured[0].initialized.error.cause
 
 
-async def test_failed_processor_leaves_no_orphaned_channels():
-    """Channels of a processor that never came up must not stay registered: the orchestrator
-    starts the pipeline anyway, and messages routed to them would hang or vanish."""
-    captured = []
-    runner = make_runner(captured)
+async def test_failed_processor_init_tears_down_the_runner(monkeypatch):
+    """A processor that cannot initialize brings the whole runner down, rather than leaving
+    the pipeline running with a missing processor whose channels would swallow messages."""
+    runner = make_runner([])
+    stream = ScriptedStream()
 
-    instance = await runner.add_processor(
-        failing_processor(arguments=channel_args("urn:channel:in", "urn:channel:out"))
-    )
+    async def fake_connect(stub):
+        return stream
 
-    assert instance is None
-    assert runner._readers == {}
-    assert runner._writers == {}
+    monkeypatch.setattr(runner, "connect", fake_connect)
 
+    run_task = asyncio.create_task(runner._run_with_stub(None))
+    stream.push(service_pb2.ToRunner(proc=failing_processor(
+        "urn:test:broken", channel_args("urn:channel:in", "urn:channel:out")
+    )))
 
-async def test_channel_of_a_failed_processor_can_be_recreated():
-    captured = []
-    runner = make_runner(captured)
-
-    await runner.add_processor(failing_processor("urn:test:broken", channel_args("urn:channel:in")))
-    await runner.add_processor(working_processor("urn:test:working", channel_args("urn:channel:in")))
-
-    assert "urn:channel:in" in runner._readers
-    assert not captured[-1].initialized.HasField("error")
-
-
-async def test_failed_processor_leaves_no_phantom_channel_stats():
-    """In server mode the channel registrations also created stats entries; a rollback
-    that keeps those shows phantom channels on the dashboard for the runner's lifetime."""
-    from rdfc_runner.server.state import State
-
-    state = State()
-    runner_id = state.register_runner("127.0.0.1", "urn:test:runner")
-    runner = Runner("urn:test:runner", state=state, runner_id=runner_id)
-    runner.logger = logging.getLogger("test")
-    runner._client = None
-
-    async def write(msg):
-        pass
-
-    runner._write = write
-
-    await runner.add_processor(
-        failing_processor(arguments=channel_args("urn:channel:in", "urn:channel:out"))
-    )
-
-    [stats] = state.snapshot()
-    assert stats["channels"] == {}
-
-
-async def test_rolled_back_reader_is_closed():
-    """The discarded reader must not linger half-open: a message that still races in on
-    its channel would otherwise be pushed to consumers of a processor that never existed."""
-    captured = []
-    runner = make_runner(captured)
-    created = []
-    original_create_reader = runner.create_reader
-
-    def spying_create_reader(uri):
-        reader = original_create_reader(uri)
-        created.append(reader)
-        return reader
-
-    runner.create_reader = spying_create_reader
-
-    await runner.add_processor(failing_processor(arguments=channel_args("urn:channel:in")))
-
-    assert runner._readers == {}
-    assert [reader.closed for reader in created] == [True]
-
-
-async def test_failed_processor_keeps_channels_of_earlier_processors():
-    captured = []
-    runner = make_runner(captured)
-
-    await runner.add_processor(working_processor("urn:test:working", channel_args("urn:channel:shared")))
-    established = runner._readers["urn:channel:shared"]
-
-    await runner.add_processor(failing_processor("urn:test:broken", channel_args("urn:channel:shared")))
-
-    # The rollback removes what the failed processor registered, not what was already there.
-    assert runner._readers["urn:channel:shared"] is established
+    with pytest.raises(ModuleNotFoundError):
+        await asyncio.wait_for(run_task, timeout=5)
 
 
 async def test_close_message_does_not_block_the_listener_on_an_open_stream():

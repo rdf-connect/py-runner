@@ -155,7 +155,10 @@ class RunnerServer:
                 watcher = asyncio.create_task(self._watch_grpc_state(channel, runner_id))
                 try:
                     self.state.set_status(runner_id, "running")
-                    await Runner(uri, state=self.state, runner_id=runner_id).run_with_channel(channel)
+                    # The runner stays decoupled from State: it gets a channel-tracker
+                    # factory, so this handler remains the only place that mutates State.
+                    runner = Runner(uri, track_channel=lambda u, r: self.state.track_channel(runner_id, u, r))
+                    await runner.run_with_channel(channel)
                     self.state.set_status(runner_id, "done")
                 finally:
                     watcher.cancel()
@@ -176,6 +179,11 @@ class RunnerServer:
             self._connections.discard(task)
             if not writer.is_closing():
                 writer.close()
+            # The finished runner's grpc.aio channel sits in a reference cycle, so refcounting
+            # alone never frees it (see the shutdown note below for why that matters). Force a
+            # cyclic GC pass now, while the loop is healthy, to reclaim it promptly instead of
+            # letting closed channels accumulate for the server's lifetime.
+            gc.collect()
 
     async def _watch_grpc_state(self, channel, runner_id: str) -> None:
         with contextlib.suppress(asyncio.CancelledError):
