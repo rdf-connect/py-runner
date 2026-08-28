@@ -1,0 +1,8 @@
+{
+  "name": "py-runner-e2e",
+  "private": true,
+  "description": "RDF-Connect orchestrator used to drive the py-runner end-to-end test.",
+  "devDependencies": {
+    "@rdfc/orchestrator-js": "2.2.2"
+  }
+}

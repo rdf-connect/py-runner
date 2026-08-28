@@ -9,10 +9,12 @@ readme = "README.md"
 requires-python = ">= 3.12"
 license = "MIT"
 dependencies = [
+    "aiohttp>=3.10",
     "grpcio>=1.74.0",
     "grpcio-tools>=1.74.0",
     "protobuf>=6.31.1",
     "rdfc-proto>=1.0.0",
+    "rdflib>=7.0",
     "types-protobuf>=6.30.2.20250703",
 ]
 
@@ -23,6 +25,21 @@ Issues = "https://github.com/rdf-connect/py-runner/issues"
 
 [project.scripts]
 rdfc-runner = "rdfc_runner.__main__:main"
+rdfc-runner-server = "rdfc_runner.server.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "e2e: end-to-end tests that require Node and the RDF-Connect orchestrator (opt-in; run with `-m e2e`)",
+]
+addopts = "-m 'not e2e'"
 
 [build-system]
 requires = ["hatchling"]

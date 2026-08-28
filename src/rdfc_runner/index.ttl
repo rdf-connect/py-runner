@@ -2,7 +2,7 @@
 @prefix sh: <http://www.w3.org/ns/shacl#>.
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
 
-rdfc:PyRunner a rdfc:Runner;
+rdfc:PyRunner a rdfc:CommandRunner;
     rdfc:handlesSubjectsOf rdfc:pyImplementationOf;
     rdfc:command "hatch run python -m rdfc_runner".
 

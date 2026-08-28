@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from abc import abstractmethod, ABC
 from collections.abc import AsyncIterable
 from logging import Logger
@@ -10,7 +11,7 @@ from .convertor import AnyType
 from .convertor import StringConvertor, StreamConvertor, NoConvertor, AnyConvertor
 from .iterable import MyIter
 from .types import Writable
-from .utils import fanout_stream
+from .utils import fanout_stream, spawn_logged
 
 
 ### Interface ###
@@ -59,12 +60,18 @@ class Reader(ABC):
 
 ### Implementations ###
 class ReaderInstance(Reader):
-    def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, logger: Logger):
+    def __init__(self, uri: str, client: service_pb2_grpc.RunnerStub, notify_orchestrator: Writable, logger: Logger,
+                 tracker=None):
         self._uri = uri
         self.client = client
         self.notify_orchestrator = notify_orchestrator
         self.logger = logger
+        self.tracker = tracker
         self.consumers: List[MyIter] = []
+        self.closed = False
+        # Released on close: consumers that are dropped while suspended inside a stream
+        # message never run their `finally`, so the fan-out barrier needs a way out.
+        self._abort = asyncio.Event()
 
     @property
     def uri(self) -> str:
@@ -98,37 +105,93 @@ class ReaderInstance(Reader):
     def handle_msg(self, msg: common_pb2.ReceivingMessage):
         """Handle a message from the orchestrator."""
         self.logger.debug(f"{self.uri} handling incoming message of {len(msg.data)} bytes")
+        if self.tracker:
+            self.tracker.record_message(len(msg.data))
+
+        if self.closed:
+            # The consumers are gone; ack anyway so the orchestrator is not left waiting.
+            self.logger.debug(f"{self.uri} is closed, message {msg.globalSequenceNumber} is not processed")
+            spawn_logged(self._notify_processed(msg.globalSequenceNumber, msg.channel), self.logger,
+                         f"ack of message on closed reader {self.uri}")
+            return
 
         async def push_to_consumer(consumer: MyIter, data: bytes):
             future = asyncio.Future()
-            consumer.push(data, lambda: future.set_result(None))
+
+            def delivered():
+                if not future.done():
+                    future.set_result(None)
+
+            try:
+                consumer.push(data, delivered)
+            except RuntimeError:
+                # Closed between the guard above and this push: nobody left to deliver to.
+                return
             await future
 
         async def push_to_consumers():
-            # Wait for all consumers to process the message
-            await asyncio.gather(
-                *[
-                    push_to_consumer(consumer, msg.data)
-                    for consumer in self.consumers
-                ]
-            )
+            # Wait for all consumers to process the message, unless the reader closes
+            # first: a consumer that is gone never signals, and the orchestrator still
+            # needs the ack (mirroring the streaming path below).
+            pushes = asyncio.gather(*[push_to_consumer(consumer, msg.data) for consumer in self.consumers])
+            aborted = asyncio.ensure_future(self._abort.wait())
+            try:
+                done, _ = await asyncio.wait([pushes, aborted], return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                aborted.cancel()
+            if pushes in done:
+                exc = pushes.exception()
+                if exc is not None:
+                    # The message could not be delivered; ack it anyway so the sending
+                    # pipeline is not left waiting on a message that will never process.
+                    self.logger.error(
+                        f"Delivering message {msg.globalSequenceNumber} on {self.uri} failed: {exc!r}")
+            else:
+                self.logger.debug(f"{self.uri} closed while a message was being consumed; acking it")
+                pushes.cancel()
 
             # Notify the orchestrator after all consumers have processed the message
-            await self.notify_orchestrator(
-                service_pb2.FromRunner(
-                    processed=common_pb2.GlobalAck(
-                        globalSequenceNumber=msg.globalSequenceNumber,
-                        channel=msg.channel,
-                    )
+            await self._notify_processed(msg.globalSequenceNumber, msg.channel)
+
+        spawn_logged(push_to_consumers(), self.logger, f"push message to consumers of {self.uri}")
+
+    async def _notify_processed(self, global_sequence_number: int, channel: str) -> None:
+        await self.notify_orchestrator(
+            service_pb2.FromRunner(
+                processed=common_pb2.GlobalAck(
+                    globalSequenceNumber=global_sequence_number,
+                    channel=channel,
                 )
             )
-
-        asyncio.create_task(push_to_consumers())
+        )
 
     async def handle_streaming_msg(self, msg: common_pb2.ReceivingStreamMessage):
         """Handle a streaming message from the orchestrator."""
         self.logger.debug(
             f"{self.uri} handling incoming streaming message with global sequence number {msg.globalSequenceNumber}")
+
+        if self.closed:
+            # No consumer can read this stream any more, but the sender's flow control
+            # still needs a receiving stream driving the per-chunk acks: drain it and only
+            # then ack the message as a whole.
+            self.logger.debug(f"{self.uri} is closed, stream {msg.globalSequenceNumber} is drained unconsumed")
+            receiving_stream = self.client.receiveStreamMessage()
+            await receiving_stream.write(
+                common_pb2.SendingStreamControl(globalSequenceNumber=msg.globalSequenceNumber)
+            )
+
+            async def drain():
+                idx = 0
+                async for chunk in receiving_stream:
+                    if self.tracker:
+                        self.tracker.record_message(len(chunk.data))
+                    await receiving_stream.write(common_pb2.SendingStreamControl(streamSequenceNumber=idx))
+                    idx += 1
+                await self._notify_processed(msg.globalSequenceNumber, msg.channel)
+
+            spawn_logged(drain(), self.logger, f"drain of a stream on closed reader {self.uri}")
+            return
+
         # Start a receiving stream to receive the streaming messages over the stream message channel.
         receiving_stream = self.client.receiveStreamMessage()
 
@@ -142,13 +205,27 @@ class ReaderInstance(Reader):
                 await receiving_stream.write(common_pb2.SendingStreamControl(streamSequenceNumber=idx))
                 idx += 1
 
+        # Set once the last chunk was taken from the orchestrator's stream (also when the
+        # fan-out only drained it because nobody was left to consume it).
+        stream_exhausted = asyncio.Event()
+
+        async def tracked_chunks():
+            try:
+                async for chunk in receiving_stream:
+                    if self.tracker:
+                        self.tracker.record_message(len(chunk.data))
+                    yield chunk
+            finally:
+                stream_exhausted.set()
+
         # fan out the stream to all iterators
         consumers_done: List[Awaitable[None]] = []
 
         stream_iters = fanout_stream(
-            receiving_stream,
+            tracked_chunks(),
             len(self.consumers),
             write_sending_stream_control_message,
+            abort=self._abort,
         )
 
         for consumer in self.consumers:
@@ -157,7 +234,14 @@ class ReaderInstance(Reader):
             substream = stream_iters.pop()
             assert substream is not None
 
-            asyncio.create_task(consumer.push_stream(substream, lambda: consumed_future.set_result(None)))
+            # Bind the future to this iteration: a shared closure over the loop variable
+            # would resolve the last consumer's future for every consumer.
+            def consumed(future=consumed_future):
+                if not future.done():
+                    future.set_result(None)
+
+            spawn_logged(consumer.push_stream(substream, consumed),
+                         self.logger, f"push stream to consumer of {self.uri}")
             consumers_done.append(consumed_future)
 
         await write_sending_stream_control_message(
@@ -165,20 +249,41 @@ class ReaderInstance(Reader):
         )
 
         async def notify_after_all():
-            await asyncio.gather(*consumers_done)
-            self.logger.debug("Processed streaming message for all consumers")
-            await self.notify_orchestrator(
-                service_pb2.FromRunner(
-                    processed=common_pb2.GlobalAck(
-                        globalSequenceNumber=msg.globalSequenceNumber,
-                        channel=msg.channel
-                    )
-                )
-            )
+            if not consumers_done:
+                # Nobody consumes this channel: the fan-out drains and acks the chunks, and
+                # only once it is through is the message handled as far as this runner goes.
+                await stream_exhausted.wait()
+                await self._notify_processed(msg.globalSequenceNumber, msg.channel)
+                return
 
-        asyncio.create_task(notify_after_all())
+            consumed = asyncio.gather(*consumers_done)
+            aborted = asyncio.ensure_future(self._abort.wait())
+            try:
+                done, _ = await asyncio.wait([consumed, aborted], return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                aborted.cancel()
+            if consumed in done:
+                self.logger.debug("Processed streaming message for all consumers")
+            else:
+                # Closed mid-message: a consumer that was already closed never signals the
+                # stream it was handed. Wait for the fan-out to finish draining the stream
+                # so the global ack still comes after the last chunk was handled.
+                consumed.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consumed
+                await stream_exhausted.wait()
+                self.logger.debug(f"{self.uri} closed while handling a streaming message; acking it")
+            await self._notify_processed(msg.globalSequenceNumber, msg.channel)
+
+        spawn_logged(notify_after_all(), self.logger, f"streaming message ack for {self.uri}")
 
     def close(self) -> None:
-        """Close all iterators."""
+        """Close all iterators and release the fan-out of any in-flight stream message."""
+        if self.closed:
+            return
+        self.closed = True
+        # A consumer that is still suspended inside a stream message will never resume, so
+        # the fan-out barrier must stop waiting for it: it drains and acks the rest instead.
+        self._abort.set()
         for consumer in self.consumers:
             consumer.close(lambda: None)
