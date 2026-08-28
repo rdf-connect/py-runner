@@ -18,6 +18,13 @@ class ChannelStats:
     bytes_total: int = 0
     last_message_at: Optional[int] = None
     latencies_ms: list[float] = field(default_factory=list)
+    # Stream messages are tracked separately from per-chunk stats above: a stream spans
+    # many chunks and its whole-stream duration would dwarf the per-message latencies if
+    # mixed in. These fields count each completed stream once, with its total bytes and
+    # its full lifetime as the latency sample.
+    stream_count: int = 0
+    stream_bytes_total: int = 0
+    stream_latencies_ms: list[float] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return {
@@ -27,6 +34,9 @@ class ChannelStats:
             "bytesTotal": self.bytes_total,
             "lastMessageAt": self.last_message_at,
             "latenciesMs": self.latencies_ms,
+            "streamCount": self.stream_count,
+            "streamBytesTotal": self.stream_bytes_total,
+            "streamLatenciesMs": self.stream_latencies_ms,
         }
 
 
@@ -72,6 +82,25 @@ class ChannelTracker:
             channel.latencies_ms.append(latency_ms)
             if len(channel.latencies_ms) > MAX_LATENCY_SAMPLES:
                 channel.latencies_ms.pop(0)
+
+    def record_stream(self, num_bytes: int, latency_ms: Optional[float] = None) -> None:
+        """Record a completed stream message as a single, distinct entry.
+
+        The stream's chunks are already recorded via `record_message`; this adds the
+        stream itself, with its total byte size and full lifetime, so the dashboard can
+        show how large and how long-lived each stream was without polluting the per-chunk
+        message and latency stats.
+        """
+        channel = self._channel
+        if channel is None:
+            return
+        channel.stream_count += 1
+        channel.stream_bytes_total += num_bytes
+        channel.last_message_at = _now_ms()
+        if latency_ms is not None:
+            channel.stream_latencies_ms.append(latency_ms)
+            if len(channel.stream_latencies_ms) > MAX_LATENCY_SAMPLES:
+                channel.stream_latencies_ms.pop(0)
 
 
 def _now_ms() -> int:
@@ -131,12 +160,6 @@ class State:
         if key not in runner.channels:
             runner.channels[key] = ChannelStats(uri=uri, role=role)
         return ChannelTracker(runner.channels[key])
-
-    def untrack_channel(self, runner_id: str, uri: str, role: ChannelRole) -> None:
-        """Drop a channel's stats entry again, e.g. when its registration is rolled back."""
-        runner = self._runners.get(runner_id)
-        if runner:
-            runner.channels.pop(f"{role}:{uri}", None)
 
     def snapshot(self) -> list[dict]:
         return [runner.to_json() for runner in (*self._runners.values(), *self._history)]

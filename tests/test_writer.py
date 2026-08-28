@@ -34,9 +34,13 @@ class FakeSendingStream:
 class RecordingTracker:
     def __init__(self):
         self.records = []
+        self.streams = []
 
     def record_message(self, num_bytes, latency_ms=None):
         self.records.append((num_bytes, latency_ms))
+
+    def record_stream(self, num_bytes, latency_ms=None):
+        self.streams.append((num_bytes, latency_ms))
 
 
 def make_writer(tracker=None):
@@ -51,10 +55,11 @@ def make_writer(tracker=None):
     return writer, stream, sent
 
 
-async def test_stream_records_chunk_stats_not_its_own_lifetime():
-    """The global ack of a stream message arrives when the stream ends, however long it
-    ran: recording it like a buffered message would put one 0-byte, stream-lifetime
-    'latency' sample in the channel stats, dwarfing every real message."""
+async def test_stream_records_chunk_stats_and_one_distinct_stream_entry():
+    """The stream's chunks are recorded as per-message stats; the stream itself is recorded
+    once, separately, with its total bytes and full lifetime, so neither pollutes the other.
+    Recording the global ack like a per-chunk message would put one 0-byte, stream-lifetime
+    'latency' sample in the per-message stats, dwarfing every real message."""
     tracker = RecordingTracker()
     writer, stream, _ = make_writer(tracker)
 
@@ -70,6 +75,12 @@ async def test_stream_records_chunk_stats_not_its_own_lifetime():
 
     assert [num_bytes for num_bytes, _ in tracker.records] == [3, 5]
     assert all(latency is not None for _, latency in tracker.records)
+
+    # The stream itself is recorded once, with its total byte size.
+    assert len(tracker.streams) == 1
+    stream_bytes, stream_latency = tracker.streams[0]
+    assert stream_bytes == 8
+    assert stream_latency is not None
 
 
 async def test_orchestrator_close_deferred_by_an_open_stream_is_not_echoed_back():

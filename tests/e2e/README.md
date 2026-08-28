@@ -57,9 +57,10 @@ PYTHONPATH=processors uv run rdfc-runner-server server.ttl
 ```
 
 > [!TIP]
-> Since the dev loop re-runs the server often, you can instead activate the
-> environment once (`source ../../.venv/bin/activate`) and then run
-> `PYTHONPATH=processors rdfc-runner-server server.ttl` directly.
+> `uv run` re-resolves the project environment on every call. Since the dev loop
+> restarts the server often, you can activate the environment once
+> (`source ../../.venv/bin/activate`) and then run
+> `PYTHONPATH=processors rdfc-runner-server server.ttl` directly to skip that overhead.
 
 In another terminal, run the pipeline with the orchestrator:
 

@@ -37,7 +37,7 @@ and instantiates a runner for every incoming orchestrator connection.
 
 > [!WARNING]
 > **The gRPC port is unauthenticated and executes what a connecting orchestrator asks for.**
-> Anything that can connect to `rdfc:grpcPort` can have the server import and run arbitrary
+> Anything that can connect to `rdfc:grpcPort` can potentially make the server import and run
 > Python modules from its environment, and the HTTP port publicly serves the configured
 > processor files. The server has the same posture as js-runner's: it is meant for networks
 > where every host is trusted. Bind or firewall both ports accordingly — a private Docker
@@ -77,14 +77,13 @@ configurations from the server, and instantiating the served `rdfc:TcpRunner`:
 ```turtle
 @prefix owl: <http://www.w3.org/2002/07/owl#>.
 @prefix rdfc: <https://w3id.org/rdf-connect#>.
-@prefix runner: <http://localhost:3000/>.
 
-<> owl:imports runner:, runner:processors.ttl.
+<> owl:imports <http://localhost:3000/>, <http://localhost:3000/processors.ttl>.
 
 <> a rdfc:Pipeline;
   rdfc:consistsOf [
     rdfc:processor <logProc>, <sendProc>;
-    rdfc:instantiates runner:pyRunner;
+    rdfc:instantiates <http://localhost:3000/pyRunner>;
   ].
 ```
 

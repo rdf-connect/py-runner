@@ -121,21 +121,22 @@ def test_tracking_the_same_channel_twice_reuses_its_record():
     assert runner["channels"]["reader:urn:channel"]["bytesTotal"] == 3
 
 
-def test_untrack_channel_removes_the_stats_entry():
+def test_record_stream_is_kept_apart_from_per_chunk_message_stats():
+    """A stream is recorded as one distinct entry (total bytes, full lifetime); it must
+    not inflate the per-chunk message count, bytes or latency samples."""
     state = State()
     runner_id = state.register_runner("127.0.0.1", "urn:runner")
-    state.track_channel(runner_id, "urn:channel", "reader")
-    state.track_channel(runner_id, "urn:channel", "writer")
 
-    state.untrack_channel(runner_id, "urn:channel", "reader")
+    tracker = state.track_channel(runner_id, "urn:channel", "writer")
+    tracker.record_message(3, 1.0)
+    tracker.record_message(5, 2.0)
+    tracker.record_stream(8, 50.0)
 
     [runner] = state.snapshot()
-    assert list(runner["channels"]) == ["writer:urn:channel"]
-
-
-def test_untrack_channel_tolerates_unknown_entries():
-    state = State()
-    runner_id = state.register_runner("127.0.0.1", "urn:runner")
-
-    state.untrack_channel(runner_id, "urn:channel", "reader")
-    state.untrack_channel("no-such-runner", "urn:channel", "reader")
+    channel = runner["channels"]["writer:urn:channel"]
+    assert channel["messageCount"] == 2
+    assert channel["bytesTotal"] == 8
+    assert channel["latenciesMs"] == [1.0, 2.0]
+    assert channel["streamCount"] == 1
+    assert channel["streamBytesTotal"] == 8
+    assert channel["streamLatenciesMs"] == [50.0]

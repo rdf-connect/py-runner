@@ -1,8 +1,5 @@
 import asyncio
 import contextlib
-import os
-import shutil
-import tempfile
 from logging import getLogger
 
 import grpc.aio
@@ -97,10 +94,17 @@ class SocketBridge:
 
     The orchestrator opens the TCP connection and treats its socket end as an incoming
     connection to its own gRPC server, so this side must act as the HTTP/2 client over
-    a socket it accepted. grpcio cannot adopt an existing socket, so the bridge starts
-    a unix-domain socket server, points a grpc channel at it (`unix:<path>`), and
-    transparently pumps bytes between the TCP connection and the single unix connection
-    that grpc opens.
+    a socket it accepted. grpcio cannot adopt an existing socket, so the bridge starts a
+    loopback TCP server on an ephemeral 127.0.0.1 port, points a grpc channel at it, and
+    transparently pumps bytes between the orchestrator's TCP connection and the single
+    loopback connection that grpc opens. A loopback listener (rather than a unix-domain
+    socket) keeps the bridge working cross-platform, including on Windows.
+
+    That portability costs some access control: a unix socket in a 0700 temp directory is
+    reachable only by the same user, while this port is reachable by any process on the
+    host, which could connect before grpc does and claim the bridge. The window is short
+    and the port is never routable off the machine, but a host running untrusted local
+    processes is outside what this server already assumes (see the warning in the README).
 
     Usage:
         async with SocketBridge(reader, writer) as channel:
@@ -109,44 +113,38 @@ class SocketBridge:
 
     def __init__(self, tcp_reader: asyncio.StreamReader, tcp_writer: asyncio.StreamWriter):
         self._tcp = (tcp_reader, tcp_writer)
-        self._tmpdir = tempfile.mkdtemp(prefix="rdfc-")
-        self._path = os.path.join(self._tmpdir, "grpc.sock")
-        if len(self._path.encode()) >= 100:
-            # sun_path is limited to ~104 bytes on macOS (108 on Linux).
-            shutil.rmtree(self._tmpdir, ignore_errors=True)
-            raise RuntimeError(f"Unix socket path too long for this platform: {self._path}")
         self._claimed = False
-        self._unix_server: asyncio.Server | None = None
+        self._local_server: asyncio.Server | None = None
         self._channel: grpc.aio.Channel | None = None
 
     async def __aenter__(self) -> grpc.aio.Channel:
-        self._unix_server = await asyncio.start_unix_server(self._on_connect, path=self._path)
-        # If the injected connection ever rejects the unix-path :authority, add the
-        # ("grpc.default_authority", "localhost") channel option here.
-        self._channel = grpc.aio.insecure_channel(f"unix:{self._path}")
+        # Bind loopback on an ephemeral port; the OS picks a free one, which grpc then dials.
+        self._local_server = await asyncio.start_server(self._on_connect, "127.0.0.1", 0)
+        port = self._local_server.sockets[0].getsockname()[1]
+        self._channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
         return self._channel
 
-    async def _on_connect(self, unix_reader: asyncio.StreamReader, unix_writer: asyncio.StreamWriter) -> None:
+    async def _on_connect(self, local_reader: asyncio.StreamReader, local_writer: asyncio.StreamWriter) -> None:
         if self._claimed:
             # The TCP socket is single-use: refuse gRPC reconnect attempts so a dead
             # orchestrator connection surfaces as a channel failure instead of hanging.
             logger.warning("Refusing gRPC reconnect attempt on a single-use socket bridge")
-            unix_writer.close()
+            local_writer.close()
             return
         self._claimed = True
-        await pump_pair(self._tcp, (unix_reader, unix_writer))
+        await pump_pair(self._tcp, (local_reader, local_writer))
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._channel is not None:
             await self._channel.close()
-        # Close the TCP side before waiting on the unix server: the pump (and thereby the
-        # unix connection handler) cannot finish while the TCP peer holds its side open.
+        # Close the TCP side before waiting on the loopback server: the pump (and thereby
+        # the loopback connection handler) cannot finish while the TCP peer holds its side
+        # open.
         tcp_writer = self._tcp[1]
         if not tcp_writer.is_closing():
             tcp_writer.close()
-        if self._unix_server is not None:
-            self._unix_server.close()
-            await self._unix_server.wait_closed()
+        if self._local_server is not None:
+            self._local_server.close()
+            await self._local_server.wait_closed()
         with contextlib.suppress(Exception):
             await tcp_writer.wait_closed()
-        shutil.rmtree(self._tmpdir, ignore_errors=True)

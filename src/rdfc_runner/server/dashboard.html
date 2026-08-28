@@ -101,6 +101,7 @@
             <th>Avg latency</th>
             <th>p50</th>
             <th>p99</th>
+            <th>Streams</th>
           </tr>
         </thead>
         <tbody>
@@ -108,6 +109,9 @@
             // Role included: one runner can read and write the same URI.
             const key = runnerId + ':' + ch.role + ':' + ch.uri
             const tp = throughput(key, ch.messageCount)
+            const streams = ch.streamCount
+              ? `${ch.streamCount} (${fmtBytes(ch.streamBytesTotal)}${ch.role === 'writer' ? ', ' + avg(ch.streamLatenciesMs) : ''})`
+              : '-'
             return `<tr>
               <td class="uri" title="${esc(ch.uri)}">${esc(ch.uri)}</td>
               <td class="role-${ch.role}">${ch.role}</td>
@@ -118,6 +122,7 @@
               <td>${ch.role === 'writer' ? avg(ch.latenciesMs) : '-'}</td>
               <td>${ch.role === 'writer' ? pct(ch.latenciesMs, 50) : '-'}</td>
               <td>${ch.role === 'writer' ? pct(ch.latenciesMs, 99) : '-'}</td>
+              <td>${streams}</td>
             </tr>`
           }).join('')}
         </tbody>
