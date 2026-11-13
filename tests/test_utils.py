@@ -45,6 +45,68 @@ def test_parse_args_reader_and_writer():
     assert runner.writers == ["urn:channel:out"]
 
 
+def test_parse_args_nested_object():
+    # A nested configuration object, as the orchestrator sends a value of a
+    # property with sh:node: an object with its own fields and context
+    runner = FakeRunner()
+    args = json.dumps({
+        "config": {
+            "@id": "_:b0",
+            "@context": {"level": {"@id": "https://example.org/level"}},
+            "level": "debug",
+            "retry": {"@id": "_:b1", "@context": {}, "count": 3},
+            "output": {"@type": "https://w3id.org/rdf-connect#Writer", "@id": "urn:channel:out"},
+        },
+    })
+
+    parsed = parse_args(args, runner)
+
+    assert parsed["config"] == {"level": "debug", "retry": {"count": 3}, "output": "writer:urn:channel:out"}
+    assert parsed["config"].level == "debug"
+    assert parsed["config"].retry.count == 3
+    assert runner.writers == ["urn:channel:out"]
+
+
+def test_parse_args_lists():
+    # Several values, channels among them, and the members of RDF lists
+    runner = FakeRunner()
+    args = json.dumps({
+        "outputs": [
+            {"@type": "https://w3id.org/rdf-connect#Writer", "@id": "urn:channel:a"},
+            {"@type": "https://w3id.org/rdf-connect#Writer", "@id": "urn:channel:b"},
+        ],
+        "strategies": [{"@id": "_:s1", "size": 3}, {"@id": "_:s2", "size": 1}],
+        "tags": ["a", "b"],
+    })
+
+    parsed = parse_args(args, runner)
+
+    assert parsed["outputs"] == ["writer:urn:channel:a", "writer:urn:channel:b"]
+    assert [s.size for s in parsed["strategies"]] == [3, 1]
+    assert parsed["tags"] == ["a", "b"]
+
+
+def test_parse_args_values_and_references():
+    # A description of a node, as for rdfl:CBD, holds value objects and node
+    # references under the IRIs of its predicates
+    runner = FakeRunner()
+    args = json.dumps({
+        "shape": {
+            "@id": "https://example.org/shape",
+            "@type": "https://w3id.org/rdf-lens/ontology#CBD",
+            "https://example.org/name": [{"@value": "a", "@type": "http://www.w3.org/2001/XMLSchema#string"}],
+            "https://example.org/next": [{"@id": "https://example.org/other"}],
+        },
+    })
+
+    parsed = parse_args(args, runner)
+
+    assert parsed["shape"] == {
+        "https://example.org/name": ["a"],
+        "https://example.org/next": ["https://example.org/other"],
+    }
+
+
 async def _source(chunks):
     for chunk in chunks:
         yield chunk

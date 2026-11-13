@@ -3,6 +3,8 @@ import json
 from logging import Logger, getLogger
 from typing import AsyncGenerator, TypeVar, Callable, List, Awaitable, Coroutine, Any
 
+from .types import AttrDict
+
 T = TypeVar("T")
 
 
@@ -35,25 +37,43 @@ def parse_args(args, runner: "Runner"):
     return parsed_args
 
 
+READER = "https://w3id.org/rdf-connect#Reader"
+WRITER = "https://w3id.org/rdf-connect#Writer"
+
+
 def deserialize_arg(arg, runner: "Runner"):
     """
-    Deserialize a single argument.
-    This function can be extended to handle specific deserialization logic.
+    Deserialize a single argument, as the orchestrator sends it in JSON-LD.
+
+    - A channel, an object typed rdfc:Reader or rdfc:Writer, becomes a reader
+      or writer of this runner.
+    - A list, such as the values of a property that holds several, or the
+      members of an RDF list, is deserialized item by item.
+    - A value object, `{"@value": ...}`, becomes its value.
+    - A node reference, an object with only `@id`, becomes that identifier.
+    - Any other object, such as a nested configuration object, becomes an
+      AttrDict of its fields, each deserialized in turn. Like the arguments
+      themselves, keys starting with '@' are left out.
     """
-    if isinstance(arg, dict):
-        type = arg["@type"]
-        id = arg["@id"]
-        if type == "https://w3id.org/rdf-connect#Reader":
-            reader = runner.create_reader(id)
-            return reader
-        elif type == "https://w3id.org/rdf-connect#Writer":
-            writer = runner.create_writer(id)
-            return writer
-        else:
-            runner.logger.error(f"Unknown type {type} for argument {id}")
-            return None
-    else:
+    if isinstance(arg, list):
+        return [deserialize_arg(item, runner) for item in arg]
+    if not isinstance(arg, dict):
         return arg
+
+    type = arg.get("@type")
+    if type == READER:
+        return runner.create_reader(arg["@id"])
+    if type == WRITER:
+        return runner.create_writer(arg["@id"])
+    if "@value" in arg:
+        return arg["@value"]
+    if set(arg) == {"@id"}:
+        return arg["@id"]
+    return AttrDict({
+        key: deserialize_arg(value, runner)
+        for key, value in arg.items()
+        if not key.startswith("@")
+    })
 
 def fanout_stream(
     stream: AsyncGenerator[T, None],
