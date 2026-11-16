@@ -1,10 +1,17 @@
 @prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix owl: <http://www.w3.org/2002/07/owl#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
 @prefix sh: <http://www.w3.org/ns/shacl#>.
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
 
 rdfc:PyRunner a rdfc:CommandRunner;
     rdfc:handlesSubjectsOf rdfc:pyImplementationOf;
     rdfc:command "hatch run python -m rdfc_runner".
+
+rdfc:PyRunnerServer a owl:Class;
+    rdfs:subClassOf rdfc:RunnerServer;
+    rdfs:label "Python Runner Server"@en;
+    rdfs:comment "The runner server of the Python runner, started with rdfc-runner-server and configured with the properties of rdfc:RunnerServer."@en.
 
 <PyProcessorShape> a sh:NodeShape;
   sh:targetSubjectsOf rdfc:pyImplementationOf;
