@@ -115,19 +115,20 @@ class Runner:
 
         elif message.HasField('close'):
             # Handle the close message from the orchestrator.
-            self.logger.info("Received close message from orchestrator")
-            reader = self._readers.get(message.close.channel)
+            # A channel is usually only read or only written by this runner, so a
+            # missing reader or writer is expected; it is an error only if neither exists.
+            channel = message.close.channel
+            self.logger.info(f"Received close message from orchestrator for channel {channel}")
+            reader = self._readers.get(channel)
+            writer = self._writers.get(channel)
             if reader:
                 reader.close()
-            else:
-                self.logger.error(f"No reader found for channel {message.close.channel} to handle close.")
-            writer = self._writers.get(message.close.channel)
             if writer:
                 # Not awaited inline: with an open stream the close resolves only after a
                 # 'processed' ack that this same, strictly sequential listener dispatches.
-                spawn_logged(writer.close(True), self.logger, f"close of writer {message.close.channel}")
-            else:
-                self.logger.error(f"No writer found for channel {message.close.channel} to handle close.")
+                spawn_logged(writer.close(True), self.logger, f"close of writer {channel}")
+            if not reader and not writer:
+                self.logger.error(f"No reader or writer found for channel {channel} to handle close.")
         elif message.HasField('processed'):
             # Handle the processed acknowledgment from the orchestrator.
             self.logger.debug(

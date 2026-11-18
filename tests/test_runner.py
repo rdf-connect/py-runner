@@ -111,6 +111,31 @@ async def test_close_message_does_not_block_the_listener_on_an_open_stream():
     await asyncio.wait_for(runner.handle_orchestrator_message(close_msg), timeout=1)
 
 
+async def test_close_of_a_read_only_channel_logs_no_error(caplog):
+    """A channel this runner only reads has no writer here; that is not an error."""
+    runner = make_runner([])
+    reader = runner.create_reader("urn:channel:in")
+
+    close_msg = service_pb2.ToRunner(close=common_pb2.Close(channel="urn:channel:in"))
+    with caplog.at_level(logging.INFO, logger="test"):
+        await runner.handle_orchestrator_message(close_msg)
+
+    assert reader.closed
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("urn:channel:in" in r.getMessage() for r in caplog.records)
+
+
+async def test_close_of_an_unknown_channel_logs_an_error(caplog):
+    runner = make_runner([])
+
+    close_msg = service_pb2.ToRunner(close=common_pb2.Close(channel="urn:channel:unknown"))
+    with caplog.at_level(logging.ERROR, logger="test"):
+        await runner.handle_orchestrator_message(close_msg)
+
+    assert any("No reader or writer found for channel urn:channel:unknown" in r.getMessage()
+               for r in caplog.records)
+
+
 class EndingStream:
     """Fake bidi stream that ends immediately without a start message."""
 
