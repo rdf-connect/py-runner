@@ -1,0 +1,68 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run pytest -rs
+
+  e2e:
+    name: End-to-end tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Install RDF-Connect orchestrator
+        working-directory: tests/e2e
+        run: npm ci
+
+      # The e2e tests skip themselves when Node or the orchestrator is missing; in CI a
+      # skip would hide a broken setup, so make sure the orchestrator is actually there.
+      - name: Check orchestrator is installed
+        run: test -x tests/e2e/node_modules/.bin/rdfc
+
+      - name: Run e2e tests
+        run: uv run pytest -m e2e tests/e2e -rs
