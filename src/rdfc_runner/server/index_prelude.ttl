@@ -1,0 +1,30 @@
+@prefix prov: <http://www.w3.org/ns/prov#>.
+@prefix sds: <https://w3id.org/sds#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+@prefix owl: <http://www.w3.org/2002/07/owl#>.
+@prefix rdfl: <https://w3id.org/rdf-lens/ontology#>.
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
+@prefix sh: <http://www.w3.org/ns/shacl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+
+sds:Activity rdfs:subClassOf prov:Activity.
+rdfc:Processor rdfs:subClassOf sds:Activity.
+sds:implementationOf rdfs:subPropertyOf rdfs:subClassOf.
+rdfc:pyImplementationOf rdfs:subPropertyOf sds:implementationOf.
+
+[ ] a sh:NodeShape;
+  sh:targetSubjectsOf rdfc:pyImplementationOf;
+  sh:property [
+    sh:path rdfc:modulePath;
+    sh:name "module_path";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:datatype xsd:string;
+  ], [
+    sh:path rdfc:class;
+    sh:name "clazz";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:datatype xsd:string;
+  ].

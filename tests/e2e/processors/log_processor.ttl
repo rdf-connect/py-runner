@@ -1,0 +1,19 @@
+@prefix sh: <http://www.w3.org/ns/shacl#>.
+@prefix rdfc: <https://w3id.org/rdf-connect#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+
+rdfc:PyLogProcessor rdfc:pyImplementationOf rdfc:Processor;
+  rdfs:label "Log processor";
+  rdfs:comment "Logs every incoming message";
+  rdfc:modulePath "echo_processor";
+  rdfc:class "LogProcessor".
+
+[ ] a sh:NodeShape;
+  sh:targetClass rdfc:PyLogProcessor;
+  sh:property [
+    sh:path rdfc:reader;
+    sh:codeIdentifier "reader";
+    sh:minCount 1;
+    sh:maxCount 1;
+    sh:class rdfc:Reader;
+  ].
