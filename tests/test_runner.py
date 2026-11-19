@@ -125,15 +125,16 @@ async def test_close_of_a_read_only_channel_logs_no_error(caplog):
     assert any("urn:channel:in" in r.getMessage() for r in caplog.records)
 
 
-async def test_close_of_an_unknown_channel_logs_an_error(caplog):
+async def test_close_of_a_channel_this_runner_does_not_use_logs_no_warning(caplog):
+    """The orchestrator sends every close to every runner, so this is expected."""
     runner = make_runner([])
 
-    close_msg = service_pb2.ToRunner(close=common_pb2.Close(channel="urn:channel:unknown"))
-    with caplog.at_level(logging.ERROR, logger="test"):
+    close_msg = service_pb2.ToRunner(close=common_pb2.Close(channel="urn:channel:elsewhere"))
+    with caplog.at_level(logging.DEBUG, logger="test"):
         await runner.handle_orchestrator_message(close_msg)
 
-    assert any("No reader or writer found for channel urn:channel:unknown" in r.getMessage()
-               for r in caplog.records)
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert any("urn:channel:elsewhere" in r.getMessage() for r in caplog.records)
 
 
 class EndingStream:
